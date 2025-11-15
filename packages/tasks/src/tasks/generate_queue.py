@@ -12,11 +12,13 @@ The work queue format:
 - Last Updated: Timestamp
 
 Configuration via environment variables:
-- WORKSPACE_PATH: Path to agent workspace (default: current directory)
 - GITHUB_USERNAME: GitHub username for assignee filtering (default: current user)
-- JOURNAL_DIR: Journal directory name (default: journal)
-- TASKS_DIR: Tasks directory name (default: tasks)
-- STATE_DIR: State directory name (default: state)
+
+Command-line arguments:
+- --workspace: Path to agent workspace (default: current directory)
+- --journal-dir: Journal directory name (default: journal)
+- --tasks-dir: Tasks directory name (default: tasks)
+- --state-dir: State directory name (default: state)
 """
 
 import argparse

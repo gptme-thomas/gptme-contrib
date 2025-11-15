@@ -64,7 +64,7 @@ Generates `state/queue-generated.md` with:
 
 Via command-line arguments or environment variables:
 
-- `WORKSPACE_PATH` / `--workspace`: Agent workspace path
+- `--workspace`: Agent workspace path (command-line only)
 - `GITHUB_USERNAME` / `--github-username`: GitHub username for filtering
 - `--journal-dir`: Journal directory name (default: journal)
 - `--tasks-dir`: Tasks directory name (default: tasks)
