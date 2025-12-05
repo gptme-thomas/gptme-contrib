@@ -37,7 +37,8 @@ repos:
     args: [--config-file=mypy.ini, --explicit-package-bases]
     types: [python]
     pass_filenames: true
-    exclude: ^packages/(lessons|run_loops)/
+    # Scripts only - packages checked via make typecheck
+    exclude: ^packages/
 - repo: local
   hooks:
   - id: shellcheck
@@ -47,3 +48,11 @@ repos:
     language: system
     types: [shell]
     args: ["--severity=warning"]
+  - id: typecheck-packages
+    name: Typecheck Packages
+    description: Run mypy on packages via Makefile
+    entry: make typecheck
+    language: system
+    pass_filenames: false
+    files: ^packages/
+    types: [python]
