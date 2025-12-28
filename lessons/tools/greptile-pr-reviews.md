@@ -1,6 +1,10 @@
 ---
 match:
-  keywords: ["@greptileai", "greptile", "PR review", "code quality", "Codecov"]
+  keywords:
+    - "trigger greptile re-review after improvements"
+    - "PR received low quality score from greptile"
+    - "validate quality improvements before human review"
+    - "@greptileai review comment"
 ---
 
 # Triggering Greptile PR Reviews
