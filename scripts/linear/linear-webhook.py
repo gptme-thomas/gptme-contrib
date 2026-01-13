@@ -486,7 +486,7 @@ uv run {linear_activity_path} error {session_id} "Failed to access repository"
 1. ✅ Emit progress updates during work (use --ephemeral for transient status)
 2. ✅ Submit final response via `response` command (this closes the session)
 3. ✅ Update journal with session summary
-4. ✅ Commit and merge to main
+4. ✅ Commit changes (webhook handles merge automatically)
 5. ✅ Exit
 """
 
