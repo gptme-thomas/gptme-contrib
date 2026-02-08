@@ -248,6 +248,7 @@ class TaskInfo:
         subtasks: Count of completed and total subtasks
         issues: List of validation issues
         metadata: Raw frontmatter metadata
+        project: Project name (references projects/*.md file stem)
     """
 
     path: Path
@@ -265,6 +266,8 @@ class TaskInfo:
     subtasks: SubtaskCount
     issues: List[str]
     metadata: Dict
+    # Optional fields with defaults
+    project: Optional[str] = None  # Project name (references projects/*.md stem)
     # Multi-agent coordination fields (Phase 2)
     parallelizable: bool = False  # Can run concurrently with other work
     isolation: Optional[str] = None  # none, worktree, container
@@ -730,6 +733,7 @@ def load_tasks(
                 requires=effective_requires,  # Canonical required deps
                 related=metadata.get("related", []),
                 parent=metadata.get("parent"),
+                project=metadata.get("project"),
                 discovered_from=metadata.get("discovered-from", []),
                 subtasks=subtasks,
                 issues=issues,
@@ -786,6 +790,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "requires": task.requires,  # Canonical required deps
         "related": task.related,
         "parent": task.parent,
+        "project": task.project,
         "discovered_from": task.discovered_from,
         "depends": task.depends,  # Deprecated, kept for compatibility
         "subtasks": {

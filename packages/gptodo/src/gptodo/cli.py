@@ -216,6 +216,8 @@ def show(task_id):
         table.add_row("Priority", STATE_EMOJIS.get(task.priority) or task.priority)
     if task.tags:
         table.add_row("Tags", ", ".join(task.tags))
+    if task.project:
+        table.add_row("Project", task.project)
     if task.requires:
         table.add_row("Requires", ", ".join(task.requires))
     if task.subtasks.total > 0:
@@ -348,6 +350,12 @@ def effective(task_id: str):
     help="Filter by context tag (e.g., @coding, @research)",
 )
 @click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
     "--json",
     "output_json",
     is_flag=True,
@@ -359,7 +367,7 @@ def effective(task_id: str):
     is_flag=True,
     help="Output as JSONL (one task per line) - compact for LLM consumption",
 )
-def list_(sort, active_only, context, output_json, output_jsonl):
+def list_(sort, active_only, context, project, output_json, output_jsonl):
     """List all tasks in a table format."""
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -418,6 +426,18 @@ def list_(sort, active_only, context, output_json, output_jsonl):
             return
         if not output_json and not output_jsonl:
             console.print(f"[blue]Showing tasks with context tag '{context_tag}'[/]\n")
+
+    # Filter by project if specified
+    if project:
+        tasks = [task for task in tasks if task.project == project]
+        if not tasks:
+            if output_json:
+                print(json.dumps({"tasks": [], "count": 0}, indent=2))
+                return
+            if output_jsonl:
+                return
+            console.print(f"[yellow]No tasks found for project '{project}'[/]")
+            return
 
     # Sort tasks for display based on option
     if sort == "state":
@@ -1275,6 +1295,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "next_action": {"type": "string"},
         "waiting_for": {"type": "string"},
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
+        "project": {"type": "string"},  # Project name
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
         "depends": {"type": "list"},  # Deprecated, use requires instead
@@ -1646,12 +1667,18 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
     help="Output as JSONL (one task per line) - compact for LLM consumption",
 )
 @click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
     "--use-cache",
     "use_cache",
     is_flag=True,
     help="Check URL-based requires against cached states (run 'fetch' first)",
 )
-def ready(state, output_json, output_jsonl, use_cache):
+def ready(state, project, output_json, output_jsonl, use_cache):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
@@ -1696,6 +1723,10 @@ def ready(state, output_json, output_jsonl, use_cache):
         filtered_tasks = [task for task in all_tasks if task.state == "active"]
     else:  # both
         filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+
+    # Filter by project if specified
+    if project:
+        filtered_tasks = [task for task in filtered_tasks if task.project == project]
 
     # Filter for ready (unblocked) tasks
     ready_tasks = [task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)]
@@ -1787,6 +1818,12 @@ def ready(state, output_json, output_jsonl, use_cache):
 
 @cli.command("next")
 @click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
     "--json",
     "output_json",
     is_flag=True,
@@ -1798,7 +1835,7 @@ def ready(state, output_json, output_jsonl, use_cache):
     is_flag=True,
     help="Check URL-based requires against cached states (run 'fetch' first)",
 )
-def next_(output_json, use_cache):
+def next_(project, output_json, use_cache):
     """Show the highest priority ready (unblocked) task.
 
     Picks from new or active tasks that have no dependencies
@@ -1837,6 +1874,11 @@ def next_(output_json, use_cache):
 
     # Filter for new or active tasks
     workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+
+    # Filter by project if specified
+    if project:
+        workable_tasks = [task for task in workable_tasks if task.project == project]
+
     if not workable_tasks:
         if output_json:
             print("No new or active tasks found", file=sys.stderr)
@@ -1916,6 +1958,12 @@ def next_(output_json, use_cache):
     help="Filter by task state (default: active)",
 )
 @click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
     "--json",
     "output_json",
     is_flag=True,
@@ -1927,7 +1975,7 @@ def next_(output_json, use_cache):
     is_flag=True,
     help="Output as JSONL (one task per line) - compact for LLM consumption",
 )
-def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
+def stale(days: int, state: str, project: str, output_json: bool, output_jsonl: bool):
     """List stale tasks that haven't been modified recently.
 
     Identifies tasks that may need review for completion, archival, or reassessment.
@@ -1975,6 +2023,10 @@ def stale(days: int, state: str, output_json: bool, output_jsonl: bool):
         state_filtered = all_tasks
     else:
         state_filtered = [task for task in all_tasks if task.state == state]
+
+    # Filter by project if specified
+    if project:
+        state_filtered = [task for task in state_filtered if task.project == project]
 
     # Filter for stale tasks (not modified since cutoff)
     stale_tasks = [task for task in state_filtered if task.modified < cutoff]
@@ -3354,6 +3406,12 @@ def list_all_locks(cleanup: bool, output_json: bool):
     default="action",
     help="Task type (action=single-step, project=multi-step)",
 )
+@click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Project name to associate with",
+)
 def add(
     title: str,
     priority: str,
@@ -3361,6 +3419,7 @@ def add(
     assigned_to: str,
     state: str,
     task_type: str,
+    project: Optional[str],
 ):
     """Create a new task from title and optional stdin body.
 
@@ -3423,6 +3482,9 @@ def add(
         if tag_list:
             frontmatter_data["tags"] = tag_list
 
+    if project:
+        frontmatter_data["project"] = project
+
     # Check for stdin input (body)
     body = ""
     # Check if stdin has data (non-blocking check)
@@ -3439,6 +3501,8 @@ def add(
     lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
     if "tags" in frontmatter_data:
         lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
+    if "project" in frontmatter_data:
+        lines.append(f"project: {frontmatter_data['project']}")
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")
