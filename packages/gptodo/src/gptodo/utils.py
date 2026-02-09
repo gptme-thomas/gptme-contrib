@@ -64,8 +64,6 @@ class DirectoryConfig:
 # Used by normalize_state() to provide backward compatibility
 DEPRECATED_STATE_ALIASES: dict[str, str] = {
     "new": "backlog",  # new → backlog (untriaged work)
-    "someday": "backlog",  # someday → backlog (deferred work)
-    "paused": "backlog",  # paused → backlog (intentionally deferred)
 }
 
 
@@ -102,33 +100,45 @@ def normalize_state(state: str, warn: bool = True) -> str:
 
 def get_canonical_states() -> list[str]:
     """Get list of canonical (non-deprecated) task states."""
-    return ["backlog", "todo", "active", "ready_for_review", "waiting", "done", "cancelled"]
+    return [
+        "backlog",
+        "someday",
+        "todo",
+        "active",
+        "paused",
+        "ready_for_review",
+        "waiting",
+        "done",
+        "cancelled",
+    ]
 
 
 CONFIGS = {
     "tasks": DirectoryConfig(
         type_name="tasks",
-        # State model (Issue #240 design + ready_for_review from Issue #255):
-        # - backlog: not triaged or intentionally deferred (consolidates new/someday/paused)
+        # State model:
+        # - backlog: not triaged (default for new tasks)
+        # - someday: might do eventually, not committed (GTD concept)
         # - todo: triaged and ready to pick up
         # - active: being actively worked on
-        # - ready_for_review: work done, awaiting review/verification (Issue #255)
+        # - paused: was active, intentionally stopped, can resume
+        # - ready_for_review: work done, awaiting review/verification
         # - waiting: blocked on external response
         # - done: completed
         # - cancelled: won't do
-        # Also accepts deprecated aliases: new, someday, paused (with warnings)
+        # Deprecated alias: new → backlog
         states=[
             "backlog",
+            "someday",
             "todo",
             "active",
-            "ready_for_review",  # Issue #255: review state before done
+            "paused",
+            "ready_for_review",
             "waiting",
             "done",
             "cancelled",
-            # Deprecated aliases accepted for backward compatibility
+            # Deprecated alias accepted for backward compatibility
             "new",
-            "someday",
-            "paused",
         ],
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
@@ -159,9 +169,11 @@ PRIORITY_RANK: dict[str | None, int] = {
 STATE_STYLES = {
     # Tasks - canonical states
     "backlog": ("yellow", "backlog"),
+    "someday": ("dim yellow", "someday"),
     "todo": ("cyan", "todo"),
     "active": ("blue", "active"),
-    "ready_for_review": ("bright_yellow", "review"),  # Issue #255
+    "paused": ("cyan", "paused"),
+    "ready_for_review": ("bright_yellow", "review"),
     "waiting": ("magenta", "waiting"),
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
@@ -169,8 +181,6 @@ STATE_STYLES = {
     "blocked": ("red", "blocked"),
     # Deprecated task states (still accepted, mapped to canonical)
     "new": ("yellow", "new"),  # deprecated → backlog
-    "paused": ("cyan", "paused"),  # deprecated → backlog
-    "someday": ("yellow", "someday"),  # deprecated → backlog
     # Tweets
     "queued": ("yellow", "queued"),
     "approved": ("blue", "approved"),
@@ -189,16 +199,16 @@ STATE_STYLES = {
 STATE_EMOJIS = {
     # Canonical task states
     "backlog": "📥",
+    "someday": "💭",
     "todo": "📋",
     "active": "🏃",
-    "ready_for_review": "👀",  # Issue #255: review state
+    "paused": "⏸️",
+    "ready_for_review": "👀",
     "waiting": "⏳",
     "done": "✅",
     "cancelled": "❌",
     # Deprecated task states (still accepted)
     "new": "🆕",  # deprecated → backlog
-    "paused": "⚪",  # deprecated → backlog
-    "someday": "💭",  # deprecated → backlog
     "issues": "⚠️",
     "untracked": "❓",
     # priorities
@@ -502,7 +512,7 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
     # Check required fields
     required_fields: Dict[str, type | tuple[type, ...]] = {
         "state": str,
-        "created": (str, datetime),  # Can be string or datetime
+        "created": (str, datetime, date),  # Can be string, datetime, or date
     }
 
     for field_name, expected_type in required_fields.items():
@@ -532,8 +542,6 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
         except ValueError:
             # Try parsing as date-only
             try:
-                from datetime import date
-
                 date.fromisoformat(metadata["created"])
             except ValueError:
                 issues.append("Created date must be ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)")
@@ -626,7 +634,7 @@ def load_tasks(
                 issues.append("No state in frontmatter")
                 state = "backlog"  # Default state (canonical)
             else:
-                # Normalize deprecated states (new/someday/paused → backlog)
+                # Normalize deprecated states (new → backlog)
                 # Note: warnings suppressed during load, validated separately
                 state = normalize_state(state, warn=False)
 
@@ -641,8 +649,6 @@ def load_tasks(
                     return datetime.fromisoformat(value_str)
                 except ValueError:
                     # Try parsing as date-only
-                    from datetime import date
-
                     date_obj = date.fromisoformat(value_str)
                     return datetime.combine(date_obj, datetime.min.time())
 

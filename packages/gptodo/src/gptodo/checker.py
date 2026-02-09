@@ -82,10 +82,12 @@ class CheckerConfig:
 
 # Valid state transitions
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "backlog": ["todo", "cancelled"],
-    "todo": ["active", "backlog", "cancelled"],
-    "active": ["ready_for_review", "waiting", "done", "cancelled"],
-    "ready_for_review": ["active", "done", "cancelled"],  # Can go back to active if review fails
+    "backlog": ["todo", "someday", "paused", "cancelled"],
+    "someday": ["backlog", "todo", "cancelled"],
+    "todo": ["active", "backlog", "paused", "cancelled"],
+    "active": ["paused", "waiting", "ready_for_review", "done", "cancelled"],
+    "paused": ["active", "backlog", "cancelled"],
+    "ready_for_review": ["active", "done", "cancelled"],
     "waiting": ["active", "cancelled"],
     "done": [],  # Terminal state
     "cancelled": [],  # Terminal state

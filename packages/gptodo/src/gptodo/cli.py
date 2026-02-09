@@ -3395,8 +3395,10 @@ def list_all_locks(cleanup: bool, output_json: bool):
 )
 @click.option(
     "--state",
-    type=click.Choice(["new", "active", "paused", "done", "cancelled", "someday"]),
-    default="new",
+    type=click.Choice(
+        ["backlog", "someday", "todo", "active", "paused", "waiting", "done", "cancelled"]
+    ),
+    default="backlog",
     help="Initial task state",
 )
 @click.option(
@@ -4562,8 +4564,10 @@ def transitions_cmd(output_json: bool):
                 console.print(f"  {state} → {', '.join(next_states)}")
             else:
                 console.print(f"  {state} [dim](terminal state)[/]")
-        console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
-        console.print("[dim]Alternate: active → waiting → active → done[/]")
+        console.print("\n[dim]Main flow: backlog → todo → active → ready_for_review → done[/]")
+        console.print("[dim]Deferred: backlog → someday → backlog (GTD someday/maybe)[/]")
+        console.print("[dim]Paused: active → paused → active (intentional pause)[/]")
+        console.print("[dim]Blocked: active → waiting → active (external dependency)[/]")
 
 
 if __name__ == "__main__":
