@@ -584,6 +584,149 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
     console.print(f"\nTotal: {len(tasks)} tasks ({', '.join(summary)})")
 
 
+@cli.command("browse")
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    help="Include done/cancelled tasks (default: only backlog+active)",
+)
+@click.option(
+    "--project",
+    type=str,
+    default=None,
+    help="Filter by project name",
+)
+@click.option(
+    "--state",
+    "filter_state",
+    type=click.Choice(["backlog", "active", "waiting", "done", "cancelled"]),
+    default=None,
+    help="Filter by specific state",
+)
+@click.option(
+    "--no-fzf",
+    "no_fzf",
+    is_flag=True,
+    help="Force pager output (skip fzf even if available)",
+)
+def browse(show_all, project, filter_state, no_fzf):
+    """Interactively browse task contents.
+
+    Uses fzf for interactive selection with a live preview pane.
+    Falls back to a paged view if fzf is not installed or --no-fzf is used.
+
+    By default, only shows backlog and active tasks. Use --all to include
+    done/cancelled tasks.
+    """
+    import shutil
+    import subprocess
+
+    console = Console()
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    # Load all tasks
+    all_tasks = load_tasks(tasks_dir)
+    if not all_tasks:
+        console.print("[yellow]No tasks found[/]")
+        return
+
+    # Filter tasks
+    tasks = all_tasks
+    if filter_state:
+        tasks = [t for t in tasks if t.state == filter_state]
+    elif not show_all:
+        tasks = [t for t in tasks if t.state in ["backlog", "active"]]
+
+    if project:
+        tasks = [t for t in tasks if t.project == project]
+
+    if not tasks:
+        console.print("[yellow]No tasks found matching filters[/]")
+        return
+
+    # Sort by creation date
+    tasks.sort(key=lambda t: t.created)
+
+    # Decide mode: fzf or pager
+    use_fzf = not no_fzf and shutil.which("fzf")
+
+    if use_fzf:
+        _browse_fzf(tasks, repo_root)
+    else:
+        _browse_pager(tasks, repo_root)
+
+
+def _browse_fzf(tasks, repo_root):
+    """Browse tasks interactively using fzf with preview."""
+    import subprocess
+
+    # Build input lines: "task-name [state] (priority)"
+    lines = []
+    for task in tasks:
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        priority_str = f" {STATE_EMOJIS.get(task.priority or '', '')}" if task.priority else ""
+        lines.append(f"{task.name} [{state_emoji} {task.state}]{priority_str}")
+
+    input_text = "\n".join(lines)
+
+    # Run fzf with preview
+    result = subprocess.run(
+        [
+            "fzf",
+            "--preview", "gptodo show {1}",
+            "--preview-window", "right:60%:wrap",
+            "--ansi",
+            "--no-sort",
+            "--header", "Browse tasks (Enter=select, Esc=quit)",
+        ],
+        input=input_text,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0 and result.stdout.strip():
+        # User selected a task — extract the task name (first field)
+        selected = result.stdout.strip().split()[0]
+        click.echo(selected)
+
+
+def _browse_pager(tasks, repo_root):
+    """Browse tasks using a pager (fallback when fzf unavailable)."""
+    parts = []
+    for i, task in enumerate(tasks):
+        if i > 0:
+            parts.append("")
+
+        # Separator header
+        state_emoji = STATE_EMOJIS.get(task.state or "untracked", "•")
+        header = f"═══ {task.name} [{state_emoji} {task.state}] ═══"
+        parts.append(header)
+
+        # Metadata
+        if task.priority:
+            parts.append(f"  Priority: {task.priority}")
+        if task.project:
+            parts.append(f"  Project:  {task.project}")
+        if task.tags:
+            parts.append(f"  Tags:     {', '.join(task.tags)}")
+        if task.requires:
+            parts.append(f"  Requires: {', '.join(task.requires)}")
+        parts.append(f"  Created:  {task.created_ago}")
+        parts.append(f"  Modified: {task.modified_ago}")
+        if task.subtasks.total > 0:
+            parts.append(f"  Subtasks: {task.subtasks.completed}/{task.subtasks.total}")
+
+        # Content
+        parts.append("")
+        post = frontmatter.load(task.path)
+        parts.append(post.content)
+
+    output = "\n".join(parts) + "\n"
+    click.echo_via_pager(output)
+
+
 def print_status_section(
     console: Console, title: str, items: List[TaskInfo], show_state: bool = False
 ):
