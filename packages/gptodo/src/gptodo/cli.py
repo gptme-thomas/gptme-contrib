@@ -48,7 +48,6 @@ from gptodo.utils import (
     TaskInfo,
     # Constants
     CONFIGS,
-    PRIORITY_RANK,
     STATE_STYLES,
     STATE_EMOJIS,
     # Core utilities
@@ -171,17 +170,24 @@ def show(task_id, render=False):
     """Show detailed information about a task."""
     if render:
         from rich.theme import Theme
+
         # Use FZF_PREVIEW_COLUMNS if available (set by fzf for preview commands)
         # so Rich wraps at the correct width — prevents fzf wrap arrows and
         # ensures code block backgrounds extend to full width
         preview_width = int(os.environ.get("FZF_PREVIEW_COLUMNS", 0)) or None
-        console = Console(force_terminal=True, width=preview_width, theme=Theme({
-            "markdown.h1": "bold bright_cyan",
-            "markdown.h2": "bold bright_green",
-            "markdown.h3": "bold bright_yellow",
-            "markdown.h4": "bold bright_magenta",
-            "markdown.code": "on grey23",
-        }))
+        console = Console(
+            force_terminal=True,
+            width=preview_width,
+            theme=Theme(
+                {
+                    "markdown.h1": "bold bright_cyan",
+                    "markdown.h2": "bold bright_green",
+                    "markdown.h3": "bold bright_yellow",
+                    "markdown.h4": "bold bright_magenta",
+                    "markdown.code": "on grey23",
+                }
+            ),
+        )
     else:
         console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -250,6 +256,7 @@ def show(task_id, render=False):
     post = frontmatter.load(task.path)  # Reload to get content
     if render:
         from rich.markdown import Markdown
+
         console.print(Markdown(post.content))
     else:
         console.out(post.content, highlight=True)
@@ -637,7 +644,9 @@ def _get_browse_lines(tasks_dir, sort_key="date", filter_state=None, project=Non
 
     # Compute column widths from data
     col_name = max(max(len(t.name) for t in tasks), len("NAME"))
-    col_state = max(max(len(t.state or "untracked") + 2 for t in tasks), len("STATE"))  # +2 for emoji+space
+    col_state = max(
+        max(len(t.state or "untracked") + 2 for t in tasks), len("STATE")
+    )  # +2 for emoji+space
     col_proj = max(max(len(t.project or "") for t in tasks), len("PROJECT"))
 
     # Header row
@@ -651,7 +660,9 @@ def _get_browse_lines(tasks_dir, sort_key="date", filter_state=None, project=Non
         priority_emoji = STATE_EMOJIS.get(task.priority or "", "")
         project_str = task.project or ""
         age = task.created_ago
-        lines.append(f"{task.name:<{col_name}}  {state_text:<{col_state}}  {priority_emoji:<2}  {project_str:<{col_proj}}  {age}")
+        lines.append(
+            f"{task.name:<{col_name}}  {state_text:<{col_state}}  {priority_emoji:<2}  {project_str:<{col_proj}}  {age}"
+        )
 
     return lines
 
@@ -855,6 +866,19 @@ def browse(show_all, project, filter_state, no_fzf):
         _browse_pager(tasks, repo_root)
 
 
+def _fzf_version() -> tuple[int, ...]:
+    """Return fzf version as a tuple, e.g. (0, 38, 0)."""
+    import subprocess
+
+    try:
+        out = subprocess.check_output(["fzf", "--version"], text=True, stderr=subprocess.DEVNULL)
+        # "0.38.0 (debian)" -> "0.38.0"
+        ver_str = out.strip().split()[0]
+        return tuple(int(x) for x in ver_str.split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
 def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
     """Browse tasks interactively using fzf with full TUI.
 
@@ -894,7 +918,7 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
         reload_cmd = f"sh {state_dir}/reload.sh"
 
         # Build keybindings
-        bindings = ",".join([
+        bind_list = [
             f"?:execute(sh {state_dir}/palette.sh {{1}})+reload({reload_cmd})",
             f"ctrl-s:execute(sh {state_dir}/sort-picker.sh)+reload({reload_cmd})",
             f"ctrl-f:execute(sh {state_dir}/filter-picker.sh)+reload({reload_cmd})",
@@ -905,31 +929,49 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
             "ctrl-p:change-preview(gptodo show --render {1})+change-preview-label( Task Preview )",
             "ctrl-r:change-preview(gptodo show {1})+change-preview-label( Raw Markdown )",
             "ctrl-w:change-preview-window(right:60%:wrap|down:75%:wrap)+refresh-preview",
-            "resize:refresh-preview",
             "ctrl-/:toggle-preview",
-        ])
+        ]
+        # resize event requires fzf >= 0.42.0
+        if _fzf_version() >= (0, 42, 0):
+            bind_list.append("resize:refresh-preview")
+        bindings = ",".join(bind_list)
 
-        # Run fzf with full TUI
+        # Run fzf with full TUI.
+        # Only capture stdout (for the selection); let stderr go to the
+        # terminal so fzf can render its TUI via /dev/tty or stderr fallback.
         result = subprocess.run(
             [
                 "fzf",
-                "--preview", "gptodo show --render {1}",
-                "--preview-window", "down:75%:wrap",
-                "--preview-label", " Task Preview ",
-                "--layout", "reverse",
-                "--border", "rounded",
+                "--preview",
+                "gptodo show --render {1}",
+                "--preview-window",
+                "down:75%:wrap",
+                "--preview-label",
+                " Task Preview ",
+                "--layout",
+                "reverse",
+                "--border",
+                "rounded",
                 "--ansi",
                 "--no-sort",
-                "--header-lines", "1",
-                "--border-label", border_label,
-                "--border-label-pos", "0:bottom",
-                "--bind", bindings,
+                "--header-lines",
+                "1",
+                "--border-label",
+                border_label,
+                "--border-label-pos",
+                "0:bottom",
+                "--bind",
+                bindings,
             ],
             input=input_text,
-            capture_output=True,
+            stdout=subprocess.PIPE,
             text=True,
         )
 
+        if result.returncode == 2:
+            # fzf error (bad flags, etc.) — report to stderr (which is the terminal)
+            Console(stderr=True).print("[red]fzf error (exit 2) — try: gptodo browse --no-fzf[/]")
+            return
         if result.returncode == 0 and result.stdout.strip():
             # Extract task name (first whitespace-separated field)
             selected = result.stdout.strip().split()[0]
