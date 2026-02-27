@@ -392,3 +392,74 @@ def test_execute_no_work(workspace):
 
         assert result.exit_code == 0
         assert result.success is True
+
+
+def test_backend_passthrough(workspace):
+    """Test that backend param passes through to BaseRunLoop."""
+    run = ProjectMonitoringRun(workspace, backend="claude-code")
+    assert run.backend == "claude-code"
+
+
+def test_backend_default(workspace):
+    """Test that backend defaults when not specified."""
+    import os
+    from unittest.mock import patch as mock_patch
+
+    with mock_patch.dict(os.environ, {}, clear=True):
+        run = ProjectMonitoringRun(workspace)
+        assert run.backend == "gptme"
+
+
+@patch("gptme_runloops.base.execute_claude_code")
+def test_execute_with_claude_code_backend(mock_execute, workspace):
+    """Test execute dispatches to claude-code when backend is set."""
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    mock_execute.return_value = ExecutionResult(exit_code=0)
+
+    run = ProjectMonitoringRun(workspace, backend="claude-code")
+    run._discovered_work = [
+        WorkItem(
+            repo="gptme/gptme",
+            item_type="pr_update",
+            number=123,
+            title="Add feature",
+            url="https://github.com/gptme/gptme/pull/123",
+            details="PR #123 updated",
+        )
+    ]
+
+    prompt = run.generate_prompt()
+    result = run.execute(prompt)
+
+    assert result.exit_code == 0
+    mock_execute.assert_called_once()
+    # Verify it was called with claude-code executor, not gptme
+    call_kwargs = mock_execute.call_args
+    assert "prompt" in call_kwargs.kwargs or len(call_kwargs.args) > 0
+
+
+@patch("gptme_runloops.base.execute_codex")
+def test_execute_with_codex_backend(mock_execute, workspace):
+    """Test execute dispatches to codex when backend is set."""
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    mock_execute.return_value = ExecutionResult(exit_code=0)
+
+    run = ProjectMonitoringRun(workspace, backend="codex")
+    run._discovered_work = [
+        WorkItem(
+            repo="gptme/gptme",
+            item_type="pr_update",
+            number=123,
+            title="Add feature",
+            url="https://github.com/gptme/gptme/pull/123",
+            details="PR #123 updated",
+        )
+    ]
+
+    prompt = run.generate_prompt()
+    result = run.execute(prompt)
+
+    assert result.exit_code == 0
+    mock_execute.assert_called_once()

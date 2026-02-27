@@ -1,11 +1,17 @@
 """Base class for all run loop types."""
 
+import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
+from gptme_runloops.utils.execution import (
+    ExecutionResult,
+    execute_claude_code,
+    execute_codex,
+    execute_gptme,
+)
 from gptme_runloops.utils.git import git_pull_with_retry
 from gptme_runloops.utils.lock import RunLoopLock
 from gptme_runloops.utils.logging import (
@@ -37,6 +43,7 @@ class BaseRunLoop(ABC):
         run_type: str,
         timeout: int = 3000,
         lock_wait: bool = False,
+        backend: str | None = None,
     ):
         """Initialize run loop.
 
@@ -45,11 +52,14 @@ class BaseRunLoop(ABC):
             run_type: Type of run (for logging and locking)
             timeout: Maximum execution time in seconds
             lock_wait: Whether to wait for lock or fail immediately
+            backend: Execution backend ("gptme", "claude-code", "codex").
+                     Defaults to EXECUTION_BACKEND env var, or "gptme".
         """
         self.workspace = Path(workspace)
         self.run_type = run_type
         self.timeout = timeout
         self.lock_wait = lock_wait
+        self.backend = backend or os.environ.get("EXECUTION_BACKEND", "gptme")
 
         # Initialize utilities
         lock_dir = self.workspace / "logs"
@@ -120,7 +130,9 @@ class BaseRunLoop(ABC):
         pass
 
     def execute(self, prompt: str) -> ExecutionResult:
-        """Execute gptme with the generated prompt.
+        """Execute with the configured backend.
+
+        Dispatches to gptme, Claude Code, or Codex based on self.backend.
 
         Args:
             prompt: Prompt text
@@ -128,15 +140,32 @@ class BaseRunLoop(ABC):
         Returns:
             ExecutionResult with exit code and status
         """
-        self.logger.info(f"Starting gptme execution (timeout: {self.timeout}s)...")
-
-        result = execute_gptme(
-            prompt=prompt,
-            workspace=self.workspace,
-            timeout=self.timeout,
-            non_interactive=True,
-            run_type=self.run_type,
+        self.logger.info(
+            f"Starting {self.backend} execution (timeout: {self.timeout}s)..."
         )
+
+        if self.backend == "claude-code":
+            result = execute_claude_code(
+                prompt=prompt,
+                workspace=self.workspace,
+                timeout=self.timeout,
+                run_type=self.run_type,
+            )
+        elif self.backend == "codex":
+            result = execute_codex(
+                prompt=prompt,
+                workspace=self.workspace,
+                timeout=self.timeout,
+                run_type=self.run_type,
+            )
+        else:
+            result = execute_gptme(
+                prompt=prompt,
+                workspace=self.workspace,
+                timeout=self.timeout,
+                non_interactive=True,
+                run_type=self.run_type,
+            )
 
         if result.timed_out:
             self.logger.warning(f"Execution timed out after {self.timeout}s")
@@ -195,6 +224,13 @@ class BaseRunLoop(ABC):
 
             # Generate prompt
             prompt = self.generate_prompt()
+
+            # Check SKIP_EXECUTION (discovery still runs, execution skipped)
+            if os.environ.get("SKIP_EXECUTION") == "1":
+                self.logger.info(
+                    "SKIP_EXECUTION=1 set, skipping execution (discovery completed)"
+                )
+                return 0
 
             # Execute
             result = self.execute(prompt)

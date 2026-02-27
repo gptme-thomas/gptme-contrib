@@ -98,12 +98,20 @@ def team(workspace: Path, tools: str | None):
     default=os.environ.get("AGENT_NAME", "Agent"),
     help="Agent name for prompts (default: $AGENT_NAME env var or 'Agent')",
 )
+@click.option(
+    "--backend",
+    type=click.Choice(["gptme", "claude-code", "codex"]),
+    envvar="EXECUTION_BACKEND",
+    default=None,
+    help="Execution backend (default: $EXECUTION_BACKEND or gptme)",
+)
 def monitoring(
     workspace: Path,
     orgs: tuple[str, ...],
     repos: tuple[str, ...],
     author: str,
     agent_name: str,
+    backend: str | None,
 ):
     """Run project monitoring loop."""
     run = ProjectMonitoringRun(
@@ -112,6 +120,7 @@ def monitoring(
         target_repos=list(repos) if repos else None,
         author=author,
         agent_name=agent_name,
+        backend=backend,
     )
     exit_code = run.run()
     sys.exit(exit_code)

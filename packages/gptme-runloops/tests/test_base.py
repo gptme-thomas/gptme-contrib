@@ -1,5 +1,6 @@
 """Tests for BaseRunLoop."""
 
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -123,3 +124,143 @@ def test_base_run_exception_handling():
             assert exit_code == 1
             # Lock should be released in cleanup
             assert run.lock.lock_fd is None
+
+
+def test_backend_defaults_to_gptme():
+    """Test that default backend is gptme."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        # Clear env to ensure default
+        with patch.dict(os.environ, {}, clear=True):
+            run = TestRunLoop(workspace, "test")
+            assert run.backend == "gptme"
+
+
+def test_backend_from_env():
+    """Test that backend reads from EXECUTION_BACKEND env var."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        with patch.dict(os.environ, {"EXECUTION_BACKEND": "claude-code"}):
+            run = TestRunLoop(workspace, "test")
+            assert run.backend == "claude-code"
+
+
+def test_backend_explicit_overrides_env():
+    """Test that explicit backend param overrides env var."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        with patch.dict(os.environ, {"EXECUTION_BACKEND": "gptme"}):
+            run = TestRunLoop(workspace, "test", backend="codex")
+            assert run.backend == "codex"
+
+
+def test_execute_dispatches_to_claude_code():
+    """Test that execute dispatches to execute_claude_code for claude-code backend."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test", backend="claude-code")
+
+        with patch("gptme_runloops.base.execute_claude_code") as mock_execute:
+            mock_execute.return_value = ExecutionResult(exit_code=0)
+
+            result = run.execute("Test prompt")
+            assert result.success
+            mock_execute.assert_called_once_with(
+                prompt="Test prompt",
+                workspace=workspace,
+                timeout=3000,
+                run_type="test",
+            )
+
+
+def test_execute_dispatches_to_codex():
+    """Test that execute dispatches to execute_codex for codex backend."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test", backend="codex")
+
+        with patch("gptme_runloops.base.execute_codex") as mock_execute:
+            mock_execute.return_value = ExecutionResult(exit_code=0)
+
+            result = run.execute("Test prompt")
+            assert result.success
+            mock_execute.assert_called_once_with(
+                prompt="Test prompt",
+                workspace=workspace,
+                timeout=3000,
+                run_type="test",
+            )
+
+
+def test_execute_dispatches_to_gptme_default():
+    """Test that execute dispatches to execute_gptme for default/gptme backend."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test", backend="gptme")
+
+        with patch("gptme_runloops.base.execute_gptme") as mock_execute:
+            mock_execute.return_value = ExecutionResult(exit_code=0)
+
+            result = run.execute("Test prompt")
+            assert result.success
+            mock_execute.assert_called_once()
+
+
+def test_skip_execution_env():
+    """Test SKIP_EXECUTION=1 skips execution but runs discovery."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+
+        with (
+            patch.dict(os.environ, {"SKIP_EXECUTION": "1"}),
+            patch("gptme_runloops.base.git_pull_with_retry") as mock_pull,
+            patch("gptme_runloops.base.execute_gptme") as mock_execute,
+        ):
+            mock_pull.return_value = True
+
+            exit_code = run.run()
+
+            assert exit_code == 0
+            # execute should NOT have been called
+            mock_execute.assert_not_called()
+            # but pre_run (git pull) should have been called
+            mock_pull.assert_called_once()
+
+
+def test_skip_execution_not_set():
+    """Test that execution proceeds normally when SKIP_EXECUTION is not set."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "logs").mkdir()
+
+        run = TestRunLoop(workspace, "test")
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("gptme_runloops.base.git_pull_with_retry") as mock_pull,
+            patch("gptme_runloops.base.execute_gptme") as mock_execute,
+        ):
+            # Ensure SKIP_EXECUTION is not set
+            os.environ.pop("SKIP_EXECUTION", None)
+            mock_pull.return_value = True
+            mock_execute.return_value = ExecutionResult(exit_code=0)
+
+            exit_code = run.run()
+
+            assert exit_code == 0
+            mock_execute.assert_called_once()
