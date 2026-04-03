@@ -135,6 +135,41 @@ from gptodo.deptree import (
 # Keep console instance for CLI output
 console = Console()
 
+BROWSE_DEFAULT_STATES = [
+    "backlog",
+    "todo",
+    "active",
+    "waiting",
+    "ready_for_review",
+]
+BROWSE_FILTER_STATES = [
+    "backlog",
+    "someday",
+    "todo",
+    "active",
+    "paused",
+    "waiting",
+    "ready_for_review",
+    "done",
+    "cancelled",
+]
+TASK_AUTONOMY_VALUES = [
+    "allowed",
+    "interactive_only",
+]
+
+
+def _normalize_browse_state(filter_state: Optional[str]) -> Optional[str]:
+    """Normalize and validate browse state filters."""
+    if filter_state is None:
+        return None
+
+    normalized = normalize_state(filter_state.replace("-", "_"), warn=False)
+    if normalized not in BROWSE_FILTER_STATES:
+        valid_states = ", ".join(BROWSE_FILTER_STATES)
+        raise click.BadParameter(f"invalid state '{filter_state}'. Choose from: {valid_states}")
+    return normalized
+
 
 @click.group()
 @click.option("-v", "--verbose", is_flag=True)
@@ -197,28 +232,34 @@ def show(task_id, render=False):
         console.print("[red]Error: Task ID or filename required[/]")
         return
 
-    # Load all tasks
-    tasks = load_tasks(tasks_dir)
-    if not tasks:
-        console.print("[red]No tasks found[/]")
-        return
-
-    # Sort tasks by creation date for consistent ID mapping
-    tasks.sort(key=lambda t: t.created)
-
-    # Find requested task
     task = None
-    if task_id.isdigit():
-        # Get task by numeric ID
-        idx = int(task_id) - 1
-        if 0 <= idx < len(tasks):
-            task = tasks[idx]
-    else:
-        # Get task by name
+    if not task_id.isdigit():
         task_name = task_id[:-3] if task_id.endswith(".md") else task_id
-        matching = [t for t in tasks if t.name == task_name]
-        if matching:
-            task = matching[0]
+        direct_path = tasks_dir / f"{task_name}.md"
+        if direct_path.is_file():
+            direct_tasks = load_tasks(tasks_dir, single_file=direct_path)
+            if direct_tasks:
+                task = direct_tasks[0]
+
+    if task is None:
+        # Fall back to full task load for numeric IDs or unknown names.
+        tasks = load_tasks(tasks_dir)
+        if not tasks:
+            console.print("[red]No tasks found[/]")
+            return
+
+        # Sort tasks by creation date for consistent ID mapping
+        tasks.sort(key=lambda t: t.created)
+
+        if task_id.isdigit():
+            idx = int(task_id) - 1
+            if 0 <= idx < len(tasks):
+                task = tasks[idx]
+        else:
+            task_name = task_id[:-3] if task_id.endswith(".md") else task_id
+            matching = [t for t in tasks if t.name == task_name]
+            if matching:
+                task = matching[0]
 
     if not task:
         console.print(f"[red]Error: Task {task_id} not found[/]")
@@ -240,6 +281,8 @@ def show(task_id, render=False):
         table.add_row("Tags", ", ".join(task.tags))
     if task.project:
         table.add_row("Project", task.project)
+    if task.metadata.get("autonomy"):
+        table.add_row("Autonomy", str(task.metadata["autonomy"]))
     if task.requires:
         table.add_row("Requires", ", ".join(task.requires))
     if task.subtasks.total > 0:
@@ -623,9 +666,10 @@ def _get_browse_lines(tasks_dir, sort_key="date", filter_state=None, project=Non
 
     # Filter
     if filter_state:
-        tasks = [t for t in tasks if t.state == filter_state]
+        normalized_state = _normalize_browse_state(filter_state)
+        tasks = [t for t in tasks if t.state == normalized_state]
     elif not show_all:
-        tasks = [t for t in tasks if t.state in ["backlog", "active"]]
+        tasks = [t for t in tasks if t.state in BROWSE_DEFAULT_STATES]
     if project:
         tasks = [t for t in tasks if t.project == project]
 
@@ -672,6 +716,12 @@ def _write_browse_scripts(state_dir, repo_root):
     sd = state_dir  # shorter alias for templates
     rr = repo_root
 
+    Path(sd, "edit-task.sh").write_text(
+        """#!/bin/sh
+exec "${EDITOR:-nano}" "$1" </dev/tty >/dev/tty 2>/dev/tty
+"""
+    )
+
     # Reload: reads state files and calls browse-list with appropriate args
     Path(sd, "reload.sh").write_text(
         f"""#!/bin/sh
@@ -702,14 +752,18 @@ choice=$(printf 'date\\npriority\\nmodified\\nname' | fzf --no-sort --header 'So
     # Filter picker: sub-fzf to choose state filter
     Path(sd, "filter-picker.sh").write_text(
         f"""#!/bin/sh
-choice=$(printf 'backlog+active (default)\\nall states\\nbacklog only\\nactive only\\nwaiting only' \\
+choice=$(printf 'open tasks (default)\\nall states\\nbacklog only\\nsomeday only\\ntodo only\\nactive only\\npaused only\\nwaiting only\\nready for review only' \\
   | fzf --no-sort --header 'Filter by state:')
 case "$choice" in
-  "backlog+active"*) printf '' > {sd}/state;;
+  "open tasks"*) printf '' > {sd}/state;;
   "all"*) printf 'all' > {sd}/state;;
   "backlog"*) printf 'backlog' > {sd}/state;;
+  "someday"*) printf 'someday' > {sd}/state;;
+  "todo"*) printf 'todo' > {sd}/state;;
   "active"*) printf 'active' > {sd}/state;;
+  "paused"*) printf 'paused' > {sd}/state;;
   "waiting"*) printf 'waiting' > {sd}/state;;
+  "ready for review"*) printf 'ready_for_review' > {sd}/state;;
 esac
 """
     )
@@ -717,9 +771,21 @@ esac
     # State change: sub-fzf to pick new state, then call gptodo edit
     Path(sd, "state-change.sh").write_text(
         """#!/bin/sh
-choice=$(printf 'backlog\\nactive\\nwaiting\\ndone\\ncancelled' \\
+choice=$(printf 'backlog\\nsomeday\\ntodo\\nactive\\npaused\\nwaiting\\nready_for_review\\ndone\\ncancelled' \\
   | fzf --no-sort --header 'Set state to:')
 [ -n "$choice" ] && gptodo edit "$1" --set state "$choice"
+"""
+    )
+
+    Path(sd, "autonomy-change.sh").write_text(
+        """#!/bin/sh
+choice=$(printf 'allowed\\ninteractive_only\\ninherit default (clear field)' \\
+  | fzf --no-sort --header 'Set autonomy to:')
+case "$choice" in
+  "allowed") gptodo edit "$1" --set autonomy allowed;;
+  "interactive_only") gptodo edit "$1" --set autonomy interactive_only;;
+  "inherit default"*) gptodo edit "$1" --set autonomy none;;
+esac
 """
     )
 
@@ -732,17 +798,29 @@ action=$(printf '%s\\n' \\
   'Sort by modified' \\
   'Sort by name' \\
   '───────────────────' \\
-  'Filter: backlog+active (default)' \\
+  'Filter: open tasks (default)' \\
   'Filter: all states' \\
   'Filter: backlog only' \\
+  'Filter: someday only' \\
+  'Filter: todo only' \\
   'Filter: active only' \\
+  'Filter: paused only' \\
   'Filter: waiting only' \\
+  'Filter: ready for review only' \\
   '───────────────────' \\
   'Change state -> backlog' \\
+  'Change state -> someday' \\
+  'Change state -> todo' \\
   'Change state -> active' \\
+  'Change state -> paused' \\
   'Change state -> waiting' \\
+  'Change state -> ready_for_review' \\
   'Change state -> done' \\
   'Change state -> cancelled' \\
+  '───────────────────' \\
+  'Change autonomy -> allowed' \\
+  'Change autonomy -> interactive_only' \\
+  'Change autonomy -> inherit default' \\
   '───────────────────' \\
   'Edit in $EDITOR' \\
   'Git blame' \\
@@ -758,17 +836,28 @@ case "$action" in
   "Sort by priority") printf 'priority' > {sd}/sort;;
   "Sort by modified") printf 'modified' > {sd}/sort;;
   "Sort by name") printf 'name' > {sd}/sort;;
-  "Filter: backlog+active"*) printf '' > {sd}/state;;
+  "Filter: open tasks"*) printf '' > {sd}/state;;
   "Filter: all"*) printf 'all' > {sd}/state;;
   "Filter: backlog"*) printf 'backlog' > {sd}/state;;
+  "Filter: someday"*) printf 'someday' > {sd}/state;;
+  "Filter: todo"*) printf 'todo' > {sd}/state;;
   "Filter: active"*) printf 'active' > {sd}/state;;
+  "Filter: paused"*) printf 'paused' > {sd}/state;;
   "Filter: waiting"*) printf 'waiting' > {sd}/state;;
+  "Filter: ready for review"*) printf 'ready_for_review' > {sd}/state;;
   "Change state"*"backlog") gptodo edit "$task" --set state backlog;;
+  "Change state"*"someday") gptodo edit "$task" --set state someday;;
+  "Change state"*"todo") gptodo edit "$task" --set state todo;;
   "Change state"*"active") gptodo edit "$task" --set state active;;
+  "Change state"*"paused") gptodo edit "$task" --set state paused;;
   "Change state"*"waiting") gptodo edit "$task" --set state waiting;;
+  "Change state"*"ready_for_review") gptodo edit "$task" --set state ready_for_review;;
   "Change state"*"done") gptodo edit "$task" --set state done;;
   "Change state"*"cancelled") gptodo edit "$task" --set state cancelled;;
-  "Edit in"*) ${{EDITOR:-vi}} {rr}/tasks/"$task".md;;
+  "Change autonomy"*"allowed") gptodo edit "$task" --set autonomy allowed;;
+  "Change autonomy"*"interactive_only") gptodo edit "$task" --set autonomy interactive_only;;
+  "Change autonomy"*"inherit default") gptodo edit "$task" --set autonomy none;;
+  "Edit in"*) sh {sd}/edit-task.sh {rr}/tasks/"$task".md;;
   "Git blame") git -C {rr} blame --date=short -- tasks/"$task".md | ${{PAGER:-less}};;
   "Git log"*) git -C {rr} log --follow --oneline --color -- tasks/"$task".md | ${{PAGER:-less -R}};;
 esac
@@ -791,7 +880,13 @@ def browse_list_cmd(sort_key, filter_state, project, show_all):
     """Output formatted task lines for fzf consumption (internal use)."""
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
-    lines = _get_browse_lines(tasks_dir, sort_key, filter_state, project, show_all)
+    lines = _get_browse_lines(
+        tasks_dir,
+        sort_key,
+        _normalize_browse_state(filter_state),
+        project,
+        show_all,
+    )
     for line in lines:
         click.echo(line)
 
@@ -801,7 +896,7 @@ def browse_list_cmd(sort_key, filter_state, project, show_all):
     "--all",
     "show_all",
     is_flag=True,
-    help="Include done/cancelled tasks (default: only backlog+active)",
+    help="Include all task states (default: open tasks only)",
 )
 @click.option(
     "--project",
@@ -812,9 +907,9 @@ def browse_list_cmd(sort_key, filter_state, project, show_all):
 @click.option(
     "--state",
     "filter_state",
-    type=click.Choice(["backlog", "active", "waiting", "done", "cancelled"]),
+    type=str,
     default=None,
-    help="Filter by specific state",
+    help="Filter by specific task state",
 )
 @click.option(
     "--no-fzf",
@@ -828,8 +923,8 @@ def browse(show_all, project, filter_state, no_fzf):
     Uses fzf for interactive selection with a live preview pane.
     Falls back to a paged view if fzf is not installed or --no-fzf is used.
 
-    By default, only shows backlog and active tasks. Use --all to include
-    done/cancelled tasks.
+    By default, shows open tasks: backlog, todo, active, waiting, and
+    ready_for_review. Use --all to include every task state.
 
     In fzf mode, press ? to open the command palette with all available actions.
     """
@@ -839,24 +934,28 @@ def browse(show_all, project, filter_state, no_fzf):
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
-    # Load all tasks (just to check if any exist)
-    all_tasks = load_tasks(tasks_dir)
-    if not all_tasks:
-        console.print("[yellow]No tasks found[/]")
-        return
-
     # Decide mode: fzf or pager
     use_fzf = not no_fzf and shutil.which("fzf")
+    normalized_state = _normalize_browse_state(filter_state)
 
     if use_fzf:
-        _browse_fzf(repo_root, show_all=show_all, project=project, filter_state=filter_state)
+        _browse_fzf(
+            repo_root,
+            show_all=show_all,
+            project=project,
+            filter_state=normalized_state,
+        )
     else:
+        all_tasks = load_tasks(tasks_dir)
+        if not all_tasks:
+            console.print("[yellow]No tasks found[/]")
+            return
         # Filter for pager mode
         tasks = all_tasks
-        if filter_state:
-            tasks = [t for t in tasks if t.state == filter_state]
+        if normalized_state:
+            tasks = [t for t in tasks if t.state == normalized_state]
         elif not show_all:
-            tasks = [t for t in tasks if t.state in ["backlog", "active"]]
+            tasks = [t for t in tasks if t.state in BROWSE_DEFAULT_STATES]
         if project:
             tasks = [t for t in tasks if t.project == project]
         if not tasks:
@@ -882,7 +981,7 @@ def _fzf_version() -> tuple[int, ...]:
 def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
     """Browse tasks interactively using fzf with full TUI.
 
-    Features: command palette (?), sort/filter pickers, state changes,
+    Features: command palette (?), sort/filter pickers, state/autonomy changes,
     git blame/log in preview, editor integration.
     """
     import subprocess
@@ -912,7 +1011,7 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
         _write_browse_scripts(state_dir, repo_root)
 
         # Keyboard hints in border label (spans full window width)
-        border_label = " ? Actions │ ^S Sort │ ^F Filter │ ^T State │ ^E Edit │ ^B Blame │ ^L Log │ ^P Preview │ ^R Raw │ ^W Layout "
+        border_label = " ? Actions │ ^S Sort │ ^F Filter │ ^T State │ ^A Auto │ ^E Edit │ ^B Blame │ ^L Log │ ^P Preview │ ^R Raw │ ^W Layout "
 
         # Reload command (reads state files, calls browse-list)
         reload_cmd = f"sh {state_dir}/reload.sh"
@@ -923,7 +1022,8 @@ def _browse_fzf(repo_root, show_all=False, project=None, filter_state=None):
             f"ctrl-s:execute(sh {state_dir}/sort-picker.sh)+reload({reload_cmd})",
             f"ctrl-f:execute(sh {state_dir}/filter-picker.sh)+reload({reload_cmd})",
             f"ctrl-t:execute(sh {state_dir}/state-change.sh {{1}})+reload({reload_cmd})",
-            f"ctrl-e:execute(${{EDITOR:-vi}} {repo_root}/tasks/{{1}}.md)+reload({reload_cmd})",
+            f"ctrl-a:execute(sh {state_dir}/autonomy-change.sh {{1}})+reload({reload_cmd})",
+            f"ctrl-e:execute(sh {state_dir}/edit-task.sh {repo_root}/tasks/{{1}}.md)+reload({reload_cmd})",
             f"ctrl-b:change-preview(git -C {repo_root} blame --date=short -- tasks/{{1}}.md)+change-preview-label( Git Blame )",
             f"ctrl-l:change-preview(git -C {repo_root} log --follow --oneline --color -- tasks/{{1}}.md)+change-preview-label( Git Log )",
             "ctrl-p:change-preview(gptodo show --render {1})+change-preview-label( Task Preview )",
@@ -995,6 +1095,8 @@ def _browse_pager(tasks, repo_root):
             parts.append(f"  Priority: {task.priority}")
         if task.project:
             parts.append(f"  Project:  {task.project}")
+        if task.metadata.get("autonomy"):
+            parts.append(f"  Autonomy: {task.metadata['autonomy']}")
         if task.tags:
             parts.append(f"  Tags:     {', '.join(task.tags)}")
         if task.requires:
@@ -1624,8 +1726,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
                 console.print(f"  [green]✓ {task_id}[/] - {', '.join(task_changes)}")
         elif verbose:
             console.print(
-                f"[dim][{timestamp}] Check #{iteration}: "
-                f"{resolved} resolved, {pending} pending[/]"
+                f"[dim][{timestamp}] Check #{iteration}: {resolved} resolved, {pending} pending[/]"
             )
 
         if once:
@@ -1649,7 +1750,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     "set_fields",
     type=(str, str),
     multiple=True,
-    help="Set a field value (state, priority, created)",
+    help="Set a field value (state, priority, created, autonomy)",
 )
 @click.option(
     "--add",
@@ -1719,6 +1820,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask):
         "priority": {"type": "enum", "values": ["high", "medium", "low", "none"]},
         "task_type": {"type": "enum", "values": ["project", "action", "none"]},
         "assigned_to": {"type": "enum", "values": ["agent", "human", "both", "none"]},
+        "autonomy": {"type": "enum", "values": TASK_AUTONOMY_VALUES},
         "waiting_since": {"type": "date"},
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},

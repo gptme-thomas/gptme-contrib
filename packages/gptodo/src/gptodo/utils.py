@@ -652,23 +652,32 @@ def load_tasks(
                     date_obj = date.fromisoformat(value_str)
                     return datetime.combine(date_obj, datetime.min.time())
 
+            stats = None
+
+            def get_stats():
+                """Load file stats lazily for timestamp fallbacks."""
+                nonlocal stats
+                if stats is None:
+                    stats = file.stat()
+                return stats
+
+            created = None
+            modified = None
+
             try:
                 created = parse_datetime_field(metadata.get("created", ""))
-                modified = parse_datetime_field(metadata.get("modified", ""))
             except (ValueError, TypeError):
-                # Fallback to git timestamps
-                try:
-                    # Get last commit time
-                    result = subprocess.run(
-                        ["git", "log", "-1", "--format=%at", "--", str(file)],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    timestamp = int(result.stdout.strip())
-                    modified = datetime.fromtimestamp(timestamp)
+                pass
 
-                    # Get first commit time (creation)
+            modified_value = metadata.get("modified")
+            if modified_value not in (None, ""):
+                try:
+                    modified = parse_datetime_field(modified_value)
+                except (ValueError, TypeError):
+                    pass
+
+            if created is None:
+                try:
                     result = subprocess.run(
                         ["git", "log", "--reverse", "--format=%at", "--", str(file)],
                         capture_output=True,
@@ -678,10 +687,10 @@ def load_tasks(
                     timestamp = int(result.stdout.strip().split("\n")[0])
                     created = datetime.fromtimestamp(timestamp)
                 except (subprocess.CalledProcessError, ValueError, IndexError):
-                    # Fallback to filesystem timestamps if git fails
-                    stats = file.stat()
-                    created = datetime.fromtimestamp(stats.st_ctime)
-                    modified = datetime.fromtimestamp(stats.st_mtime)
+                    created = datetime.fromtimestamp(get_stats().st_ctime)
+
+            if modified is None:
+                modified = datetime.fromtimestamp(get_stats().st_mtime)
 
             # Convert to naive datetime if timezone-aware
             if created.tzinfo:

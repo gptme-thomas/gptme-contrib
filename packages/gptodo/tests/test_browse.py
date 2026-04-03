@@ -2,14 +2,14 @@
 
 import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import frontmatter
 from click.testing import CliRunner
 
-from gptodo.cli import cli, _get_browse_lines
+from gptodo.cli import cli, _get_browse_lines, _write_browse_scripts
+from gptodo.utils import load_tasks as load_tasks_util
 
 
 def create_task(
@@ -20,6 +20,7 @@ def create_task(
     project: str | None = None,
     content: str = "Task body content.",
     created: str | None = None,
+    extra_meta: dict | None = None,
 ):
     """Helper to create a task markdown file with frontmatter."""
     meta = {"state": state, "priority": priority}
@@ -27,6 +28,8 @@ def create_task(
         meta["project"] = project
     if created:
         meta["created"] = created
+    if extra_meta:
+        meta.update(extra_meta)
     post = frontmatter.Post(content, **meta)
     task_file = tasks_dir / f"{name}.md"
     task_file.write_text(frontmatter.dumps(post))
@@ -49,8 +52,9 @@ def _fzf_side_effect(mock_result):
 def _get_fzf_calls(mock_run):
     """Extract fzf calls from a mock subprocess.run."""
     return [
-        c for c in mock_run.call_args_list
-        if isinstance(c[0][0], list) and c[0][0][0] == "fzf"
+        c
+        for c in mock_run.call_args_list
+        if isinstance(c[0][0], list) and c[0][0][0] == "fzf" and c[0][0][1:] != ["--version"]
     ]
 
 
@@ -85,14 +89,18 @@ class TestBrowseNoTasks:
 
 
 class TestBrowseDefaultFilter:
-    """Test that browse defaults to active+backlog tasks only."""
+    """Test that browse defaults to current open-work states."""
 
     def test_browse_active_only_default(self, tmp_path, monkeypatch):
-        """Default browse should only show backlog and active tasks."""
+        """Default browse should show current open-work states."""
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
         create_task(tasks_dir, "task-active", "active")
         create_task(tasks_dir, "task-backlog", "backlog")
+        create_task(tasks_dir, "task-todo", "todo")
+        create_task(tasks_dir, "task-review", "ready_for_review")
+        create_task(tasks_dir, "task-waiting", "waiting")
+        create_task(tasks_dir, "task-paused", "paused")
         create_task(tasks_dir, "task-done", "done")
         create_task(tasks_dir, "task-cancelled", "cancelled")
         monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
@@ -101,6 +109,10 @@ class TestBrowseDefaultFilter:
         result = runner.invoke(cli, ["browse", "--no-fzf"])
         assert "task-active" in result.output
         assert "task-backlog" in result.output
+        assert "task-todo" in result.output
+        assert "task-review" in result.output
+        assert "task-waiting" in result.output
+        assert "task-paused" not in result.output
         assert "task-done" not in result.output
         assert "task-cancelled" not in result.output
 
@@ -172,6 +184,32 @@ class TestBrowseStateFilter:
         assert "task-backlog" not in result.output
         assert "task-waiting" not in result.output
 
+    def test_browse_state_filter_ready_for_review(self, tmp_path, monkeypatch):
+        """--state should accept ready_for_review."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(tasks_dir, "task-review", "ready_for_review")
+        create_task(tasks_dir, "task-active", "active")
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["browse", "--state", "ready_for_review", "--no-fzf"])
+        assert result.exit_code == 0
+        assert "task-review" in result.output
+        assert "task-active" not in result.output
+
+    def test_browse_state_filter_ready_for_review_alias(self, tmp_path, monkeypatch):
+        """--state should accept ready-for-review as a CLI alias."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(tasks_dir, "task-review", "ready_for_review")
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["browse", "--state", "ready-for-review", "--no-fzf"])
+        assert result.exit_code == 0
+        assert "task-review" in result.output
+
 
 class TestBrowsePagerFallback:
     """Test pager fallback when fzf is unavailable."""
@@ -228,6 +266,23 @@ class TestBrowsePagerContentFormat:
         # Should contain separators (visual dividers between tasks)
         assert "═" in output or "---" in output or "===" in output
 
+    def test_browse_pager_shows_autonomy_metadata(self, tmp_path, monkeypatch):
+        """Pager output should surface autonomy metadata for tasks."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(
+            tasks_dir,
+            "interactive-task",
+            "active",
+            extra_meta={"autonomy": "interactive_only"},
+        )
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["browse", "--no-fzf"])
+        assert result.exit_code == 0
+        assert "Autonomy: interactive_only" in result.output
+
 
 class TestBrowseFzfMode:
     """Test fzf interactive mode."""
@@ -243,8 +298,10 @@ class TestBrowseFzfMode:
         mock_result.returncode = 130  # User cancelled with Esc
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             result = runner.invoke(cli, ["browse"])
             assert result.exit_code == 0
@@ -261,8 +318,10 @@ class TestBrowseFzfMode:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -283,8 +342,10 @@ class TestBrowseFzfMode:
         mock_fzf_result.returncode = 0
         mock_fzf_result.stdout = "selected-task  🏃 active  🟡      3d"
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_fzf_result)):
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_fzf_result)),
+        ):
             runner = CliRunner()
             result = runner.invoke(cli, ["browse"])
             assert "selected-task" in result.output
@@ -304,8 +365,10 @@ class TestBrowseFzfKeyHints:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -315,6 +378,7 @@ class TestBrowseFzfKeyHints:
             # Should contain the command palette hint
             assert "?" in label
             # Should contain key hints for common actions
+            assert "Auto" in label
             assert "Sort" in label
             assert "Filter" in label
             assert "Edit" in label
@@ -333,8 +397,10 @@ class TestBrowseFzfKeyHints:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -358,8 +424,10 @@ class TestBrowseFzfBindings:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -391,11 +459,55 @@ class TestBrowseFzfBindings:
         assert "ctrl-t:execute(" in bindings
         assert "state-change.sh" in bindings
 
+    def test_browse_fzf_autonomy_change_binding(self, tmp_path, monkeypatch):
+        """fzf --bind should include ctrl-a for autonomy change."""
+        bindings = self._get_bindings(tmp_path, monkeypatch)
+        assert "ctrl-a:execute(" in bindings
+        assert "autonomy-change.sh" in bindings
+
     def test_browse_fzf_edit_binding(self, tmp_path, monkeypatch):
         """fzf --bind should include ctrl-e with $EDITOR."""
         bindings = self._get_bindings(tmp_path, monkeypatch)
         assert "ctrl-e:execute(" in bindings
-        assert "EDITOR" in bindings
+        assert "edit-task.sh" in bindings
+
+    def test_browse_edit_helper_uses_nano_with_tty(self, tmp_path):
+        """Browse edit helper should default to nano and attach to /dev/tty."""
+        state_dir = tmp_path / "browse-state"
+        state_dir.mkdir()
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "tasks").mkdir()
+
+        _write_browse_scripts(state_dir, repo_root)
+        edit_script = (state_dir / "edit-task.sh").read_text()
+        palette_script = (state_dir / "palette.sh").read_text()
+
+        assert "${EDITOR:-nano}" in edit_script
+        assert "</dev/tty >/dev/tty 2>/dev/tty" in edit_script
+        assert "edit-task.sh" in palette_script
+
+    def test_browse_autonomy_helper_updates_autonomy(self, tmp_path):
+        """Browse autonomy helper should offer autonomy choices via gptodo edit."""
+        state_dir = tmp_path / "browse-state"
+        state_dir.mkdir()
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "tasks").mkdir()
+
+        _write_browse_scripts(state_dir, repo_root)
+        autonomy_script = (state_dir / "autonomy-change.sh").read_text()
+        palette_script = (state_dir / "palette.sh").read_text()
+
+        assert "allowed" in autonomy_script
+        assert "interactive_only" in autonomy_script
+        assert "--set autonomy allowed" in autonomy_script
+        assert "--set autonomy interactive_only" in autonomy_script
+        assert "--set autonomy none" in autonomy_script
+        assert "Change autonomy -> interactive_only" in palette_script
+        assert "Change autonomy -> inherit default" in palette_script
 
     def test_browse_fzf_blame_binding(self, tmp_path, monkeypatch):
         """fzf --bind should include ctrl-b with git blame."""
@@ -454,11 +566,13 @@ class TestBrowseListCommand:
         assert "myproj" in lines[1]
 
     def test_browse_list_default_filter(self, tmp_path, monkeypatch):
-        """browse-list should default to backlog+active tasks."""
+        """browse-list should default to current open-work states."""
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
         create_task(tasks_dir, "task-active", "active")
         create_task(tasks_dir, "task-backlog", "backlog")
+        create_task(tasks_dir, "task-todo", "todo")
+        create_task(tasks_dir, "task-review", "ready_for_review")
         create_task(tasks_dir, "task-done", "done")
         monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
 
@@ -466,6 +580,8 @@ class TestBrowseListCommand:
         result = runner.invoke(cli, ["browse-list"])
         assert "task-active" in result.output
         assert "task-backlog" in result.output
+        assert "task-todo" in result.output
+        assert "task-review" in result.output
         assert "task-done" not in result.output
 
     def test_browse_list_all_flag(self, tmp_path, monkeypatch):
@@ -546,9 +662,9 @@ class TestBrowseListSort:
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
         # Create tasks with different modification times
-        f1 = create_task(tasks_dir, "old-task", "active")
+        create_task(tasks_dir, "old-task", "active")
         time.sleep(0.05)
-        f2 = create_task(tasks_dir, "new-task", "active")
+        create_task(tasks_dir, "new-task", "active")
         monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
 
         runner = CliRunner()
@@ -588,18 +704,22 @@ class TestGetBrowseLines:
         assert lines[1].split()[0] == "my-task"
 
     def test_filter_defaults_to_backlog_active(self, tmp_path, monkeypatch):
-        """Default filter should only include backlog and active tasks."""
+        """Default filter should include current open-work states."""
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
         create_task(tasks_dir, "t-active", "active")
         create_task(tasks_dir, "t-backlog", "backlog")
+        create_task(tasks_dir, "t-todo", "todo")
+        create_task(tasks_dir, "t-review", "ready_for_review")
         create_task(tasks_dir, "t-done", "done")
         monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
 
         lines = _get_browse_lines(tasks_dir)
-        names = [l.split()[0] for l in lines[1:]]  # skip header
+        names = [line.split()[0] for line in lines[1:]]  # skip header
         assert "t-active" in names
         assert "t-backlog" in names
+        assert "t-todo" in names
+        assert "t-review" in names
         assert "t-done" not in names
 
     def test_show_all(self, tmp_path, monkeypatch):
@@ -611,7 +731,7 @@ class TestGetBrowseLines:
         monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
 
         lines = _get_browse_lines(tasks_dir, show_all=True)
-        names = [l.split()[0] for l in lines[1:]]  # skip header
+        names = [line.split()[0] for line in lines[1:]]  # skip header
         assert "t-active" in names
         assert "t-done" in names
 
@@ -630,8 +750,10 @@ class TestBrowseFzfPreviewLabel:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -651,8 +773,10 @@ class TestBrowseFzfPreviewLabel:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -671,8 +795,10 @@ class TestBrowseFzfPreviewLabel:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -695,8 +821,10 @@ class TestBrowseFzfRawBinding:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -747,6 +875,90 @@ class TestShowRenderFlag:
         assert result.exit_code == 0
         assert "**bold**" in result.output
 
+    def test_show_includes_autonomy_metadata(self, tmp_path, monkeypatch):
+        """show should surface autonomy metadata used by browse preview."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(
+            tasks_dir,
+            "interactive-task",
+            "active",
+            extra_meta={"autonomy": "interactive_only"},
+        )
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["show", "interactive-task"])
+        assert result.exit_code == 0
+        assert "Autonomy" in result.output
+        assert "interactive_only" in result.output
+
+    def test_show_named_task_uses_single_file_fast_path(self, tmp_path, monkeypatch):
+        """show by task name should load only the selected file."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(
+            tasks_dir,
+            "fast-task",
+            "active",
+            created="2026-04-03",
+            content="Fast path body.",
+        )
+        create_task(tasks_dir, "other-task", "active", created="2026-04-02")
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        calls = []
+
+        def tracked_load_tasks(tasks_dir_arg, recursive=False, single_file=None):
+            calls.append(single_file)
+            return load_tasks_util(tasks_dir_arg, recursive=recursive, single_file=single_file)
+
+        with patch("gptodo.cli.load_tasks", side_effect=tracked_load_tasks):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["show", "fast-task"])
+
+        assert result.exit_code == 0
+        assert "Fast path body." in result.output
+        assert calls == [tasks_dir / "fast-task.md"]
+
+
+class TestEditAutonomy:
+    """Test autonomy edits via the edit command."""
+
+    def test_edit_set_autonomy(self, tmp_path, monkeypatch):
+        """edit should allow setting autonomy to interactive_only."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(tasks_dir, "interactive-task", "active")
+        monkeypatch.setenv("GPTODO_TASKS_DIR", str(tasks_dir))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["edit", "interactive-task", "--set", "autonomy", "interactive_only"],
+        )
+
+        assert result.exit_code == 0
+        post = frontmatter.load(tasks_dir / "interactive-task.md")
+        assert post.metadata["autonomy"] == "interactive_only"
+
+
+class TestLoadTasksTimestampFallbacks:
+    """Test fast timestamp fallbacks used by browse paths."""
+
+    def test_load_tasks_avoids_git_when_modified_missing(self, tmp_path):
+        """Missing modified should fall back to file mtime without git subprocesses."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        create_task(tasks_dir, "mtime-task", "active", created="2026-04-03")
+
+        with patch("gptodo.utils.subprocess.run", side_effect=AssertionError("unexpected git")):
+            tasks = load_tasks_util(tasks_dir)
+
+        assert len(tasks) == 1
+        assert tasks[0].name == "mtime-task"
+        assert tasks[0].modified is not None
+
 
 class TestBrowseFzfHeaderLines:
     """Test that fzf uses --header-lines for column headers."""
@@ -762,8 +974,10 @@ class TestBrowseFzfHeaderLines:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -782,8 +996,10 @@ class TestBrowseFzfHeaderLines:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -801,8 +1017,10 @@ class TestBrowseFzfHeaderLines:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
@@ -821,8 +1039,10 @@ class TestBrowseFzfHeaderLines:
         mock_result.returncode = 130
         mock_result.stdout = ""
 
-        with patch("shutil.which", return_value="/usr/bin/fzf"), \
-             patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fzf"),
+            patch("subprocess.run", side_effect=_fzf_side_effect(mock_result)) as mock_run,
+        ):
             runner = CliRunner()
             runner.invoke(cli, ["browse"])
             fzf_calls = _get_fzf_calls(mock_run)
