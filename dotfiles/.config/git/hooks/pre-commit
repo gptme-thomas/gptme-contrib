@@ -112,6 +112,12 @@ fi
 
 echo -e "${GREEN}Running pre-commit checks...${NC}"
 
+# Capture the list of files staged BEFORE pre-commit runs. Used below so
+# auto-staging only re-stages files that were already part of this commit
+# — never sweeps in unrelated unstaged edits the user has in flight when a
+# formatter rewrites a staged file.
+ORIGINALLY_STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+
 # Run pre-commit checks on staged files only
 # Capture output to avoid spamming context with passed/skipped hooks
 # NOTE: Temporarily disable set -e so we can capture exit code even on failure
@@ -135,10 +141,19 @@ else
         exit 1
     fi
 
-    # Auto-stage modified files
-    git add -u
+    # Re-stage ONLY files that were already staged before pre-commit ran.
+    # Avoids the historical "git add -u" behavior that swept in any
+    # unrelated user edits the formatters happened to find. If a hook
+    # creates a brand-new file we wouldn't pick it up here — that's
+    # acceptable; pre-commit hooks rarely create new files.
+    if [ -n "$ORIGINALLY_STAGED_FILES" ]; then
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            [ -e "$f" ] && git add -- "$f"
+        done <<< "$ORIGINALLY_STAGED_FILES"
+    fi
 
-    echo -e "${GREEN}Auto-staged modified files. Re-running pre-commit...${NC}"
+    echo -e "${GREEN}Auto-staged originally-staged files. Re-running pre-commit...${NC}"
 
     # Re-run pre-commit on staged files
     # NOTE: Temporarily disable set -e so we can capture exit code even on failure
