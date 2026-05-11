@@ -1,8 +1,11 @@
 """Project monitoring run loop implementation."""
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,6 +71,10 @@ class ProjectMonitoringRun(BaseRunLoop):
         self.agent_name = agent_name
         self.state_dir = workspace / "logs/.project-monitoring-state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.main_workspace = workspace
+        self._worktree_dir: Path | None = None
+        self._worktree_branch: str | None = None
+        self._preserve_worktree_branch = False
 
         # Initialize loop detector for comment spam prevention
         self.loop_detector = CommentLoopDetector(self.state_dir)
@@ -107,6 +114,165 @@ class ProjectMonitoringRun(BaseRunLoop):
             f"Found {len(self._discovered_work)} work items: {work_summary}"
         )
         return True
+
+    def _run_git(
+        self,
+        args: list[str],
+        cwd: Path,
+        timeout: int = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def _fetch_main_workspace(self) -> bool:
+        max_retries = 3
+        retry_delay = 5
+
+        for attempt in range(1, max_retries + 1):
+            result = self._run_git(["fetch", "origin"], cwd=self.main_workspace)
+            if result.returncode == 0:
+                self.logger.info(
+                    f"Git fetch successful (attempt {attempt}/{max_retries})"
+                )
+                return True
+            if attempt < max_retries:
+                self.logger.warning(
+                    f"WARNING: Git fetch failed (attempt {attempt}/{max_retries}), "
+                    f"retrying in {retry_delay}s..."
+                )
+            else:
+                self.logger.error(
+                    f"ERROR: Git fetch failed after {max_retries} attempts, "
+                    "continuing with current state"
+                )
+        return False
+
+    def _setup_execution_worktree(self) -> bool:
+        branch = (
+            f"project-monitoring/session-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        )
+        worktree_dir = Path(
+            tempfile.mkdtemp(prefix="thomas-project-monitoring-", dir="/tmp")
+        )
+        worktree_dir.rmdir()  # git worktree add creates the directory
+
+        self.logger.info(
+            f"Creating monitoring worktree at {worktree_dir} from origin/master..."
+        )
+        result = self._run_git(
+            ["worktree", "add", "-b", branch, str(worktree_dir), "origin/master"],
+            cwd=self.main_workspace,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            self.logger.error(
+                "Failed to create monitoring worktree: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            return False
+
+        for rel in ("tmp", "state", "logs"):
+            (worktree_dir / rel).mkdir(parents=True, exist_ok=True)
+
+        main_projects = self.main_workspace / "projects"
+        worktree_projects = worktree_dir / "projects"
+        if main_projects.exists():
+            worktree_projects.mkdir(exist_ok=True)
+            for link in main_projects.iterdir():
+                if link.is_symlink():
+                    target = os.readlink(link)
+                    try:
+                        (worktree_projects / link.name).symlink_to(target)
+                    except FileExistsError:
+                        pass
+
+        self._worktree_dir = worktree_dir
+        self._worktree_branch = branch
+        self.workspace = worktree_dir
+        self.logger.info(f"Monitoring worktree ready at {worktree_dir}")
+        return True
+
+    def _push_workspace_worktree_commits(self) -> bool:
+        if self._worktree_dir is None:
+            return False
+
+        worktree_head_result = self._run_git(
+            ["rev-parse", "HEAD"], cwd=self._worktree_dir
+        )
+        if worktree_head_result.returncode != 0:
+            self.logger.warning("Could not resolve monitoring worktree HEAD")
+            return False
+        worktree_head = worktree_head_result.stdout.strip()
+
+        origin_head_result = self._run_git(
+            ["rev-parse", "origin/master"], cwd=self.main_workspace
+        )
+        origin_master = (
+            origin_head_result.stdout.strip()
+            if origin_head_result.returncode == 0
+            else ""
+        )
+
+        if worktree_head == origin_master:
+            self.logger.info("Monitoring worktree commits already on origin/master")
+            return True
+
+        self.logger.info("Pushing monitoring worktree commits to origin/master...")
+        push_result = self._run_git(
+            ["push", "origin", "HEAD:refs/heads/master"],
+            cwd=self._worktree_dir,
+            timeout=60,
+        )
+        if push_result.returncode != 0:
+            self.logger.warning(
+                "Monitoring worktree push failed; preserving local branch for rescue"
+            )
+            self._preserve_worktree_branch = True
+            return False
+
+        self.logger.info("Monitoring worktree push successful")
+        return True
+
+    def _sync_main_workspace_if_clean(self) -> bool:
+        status_result = self._run_git(["status", "--short"], cwd=self.main_workspace)
+        if status_result.returncode != 0:
+            self.logger.warning("Could not read main workspace status; skipping sync")
+            return False
+        if status_result.stdout.strip():
+            self.logger.warning(
+                "Main workspace has local changes; leaving checkout untouched"
+            )
+            return False
+
+        fetch_result = self._run_git(["fetch", "origin"], cwd=self.main_workspace)
+        if fetch_result.returncode != 0:
+            self.logger.warning("Could not refresh origin/master for main workspace")
+            return False
+
+        merge_result = self._run_git(
+            ["merge", "--ff-only", "origin/master"],
+            cwd=self.main_workspace,
+        )
+        if merge_result.returncode != 0:
+            self.logger.warning(
+                "Could not fast-forward main workspace to origin/master"
+            )
+            return False
+
+        self.logger.info("Main workspace fast-forwarded to origin/master")
+        return True
+
+    def pre_run(self) -> bool:
+        """Fetch latest refs and switch execution into an isolated worktree."""
+        fetch_ok = self._fetch_main_workspace()
+        worktree_ok = self._setup_execution_worktree()
+        return fetch_ok and worktree_ok
 
     def discover_repositories(self) -> list[str]:
         """Discover repositories from organizations and explicit repo list.
@@ -1018,7 +1184,9 @@ Classify each work item:
 - If tracking wrong branch: `git branch --unset-upstream && git push -u origin <branch>`
 
 **For Workspace Repo**:
-- Can commit directly to master
+- This session runs in an isolated workspace worktree
+- Commit in the current worktree and push with `git push origin HEAD:master`
+- Never modify the main workspace checkout directly
 
 ## Critical File Operations
 
@@ -1034,7 +1202,7 @@ Classify each work item:
 **Brief Documentation** (2-5 min max):
 1. Return to workspace: `cd {self.workspace}`
 2. Create journal entry with timestamp: `journal/{datetime.now().strftime("%Y-%m-%d-%H%M%S")}-description.md`
-3. Commit: `git add journal/*.md && git commit -m "docs(monitoring): session summary" && git push`
+3. Commit: `git add journal/*.md && git commit -m "docs(monitoring): session summary" && git push origin HEAD:master`
 4. Use `complete` tool when finished
 
 Begin processing the work now.
@@ -1054,5 +1222,40 @@ Begin processing the work now.
             self.logger.info("No work found, skipping execution")
             return ExecutionResult(exit_code=0, timed_out=False)
 
+        if self._worktree_dir is None:
+            self.logger.error(
+                "Monitoring worktree not ready; refusing main-workspace execution"
+            )
+            return ExecutionResult(exit_code=1, timed_out=False)
+
         # Execute with gptme
         return super().execute(prompt)
+
+    def post_run(self, result: ExecutionResult) -> None:
+        """Push workspace worktree changes and sync the main workspace safely."""
+        if self._worktree_dir is None:
+            return
+
+        self._push_workspace_worktree_commits()
+        self._sync_main_workspace_if_clean()
+
+    def cleanup(self) -> None:
+        """Remove monitoring worktree and restore workspace pointer."""
+        try:
+            if self._worktree_dir is not None:
+                remove_result = self._run_git(
+                    ["worktree", "remove", "--force", str(self._worktree_dir)],
+                    cwd=self.main_workspace,
+                    timeout=60,
+                )
+                if remove_result.returncode != 0 and self._worktree_dir.exists():
+                    shutil.rmtree(self._worktree_dir, ignore_errors=True)
+
+            if self._worktree_branch is not None and not self._preserve_worktree_branch:
+                self._run_git(
+                    ["branch", "-D", self._worktree_branch],
+                    cwd=self.main_workspace,
+                )
+        finally:
+            self.workspace = self.main_workspace
+            super().cleanup()

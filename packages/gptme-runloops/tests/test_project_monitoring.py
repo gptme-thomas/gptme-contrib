@@ -1,11 +1,13 @@
 """Tests for ProjectMonitoringRun class."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gptme_runloops.project_monitoring import ProjectMonitoringRun, WorkItem
+from gptme_runloops.utils.execution import ExecutionResult
 
 
 @pytest.fixture
@@ -44,6 +46,111 @@ def test_project_monitoring_custom_org(workspace):
 
     assert run.target_orgs == ["custom-org"]
     assert run.author == "custom-author"
+
+
+@patch("gptme_runloops.project_monitoring.tempfile.mkdtemp")
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_pre_run_creates_execution_worktree(
+    mock_run, mock_mkdtemp, workspace, tmp_path
+):
+    """Test pre_run fetches and switches execution into an isolated worktree."""
+    projects_dir = workspace / "projects"
+    projects_dir.mkdir()
+    target_repo = tmp_path / "linked-project"
+    target_repo.mkdir()
+    (projects_dir / "example").symlink_to(target_repo)
+
+    worktree_dir = tmp_path / "monitoring-worktree"
+    worktree_dir.mkdir()
+    mock_mkdtemp.return_value = str(worktree_dir)
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+        if cmd[:3] == ["git", "fetch", "origin"]:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "worktree", "add"]:
+            Path(cmd[5]).mkdir(parents=True, exist_ok=True)
+            return MagicMock(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    mock_run.side_effect = fake_run
+
+    run = ProjectMonitoringRun(workspace)
+    assert run.pre_run() is True
+    assert run.workspace == worktree_dir
+    assert (run.workspace / "tmp").exists()
+    assert (run.workspace / "state").exists()
+    assert (run.workspace / "logs").exists()
+    assert (run.workspace / "projects" / "example").is_symlink()
+    assert (run.workspace / "projects" / "example").resolve() == target_repo.resolve()
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_post_run_pushes_worktree_head_when_needed(mock_run, workspace, tmp_path):
+    """Test post_run pushes workspace commits from the monitoring worktree."""
+    worktree_dir = tmp_path / "monitoring-worktree"
+    worktree_dir.mkdir()
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+        if cmd == ["git", "rev-parse", "HEAD"] and cwd == worktree_dir:
+            return MagicMock(returncode=0, stdout="worktree-head\n", stderr="")
+        if cmd == ["git", "rev-parse", "origin/master"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout="old-origin-head\n", stderr="")
+        if (
+            cmd == ["git", "push", "origin", "HEAD:refs/heads/master"]
+            and cwd == worktree_dir
+        ):
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd == ["git", "status", "--short"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout=" M local.txt\n", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd} (cwd={cwd})")
+
+    mock_run.side_effect = fake_run
+
+    run = ProjectMonitoringRun(workspace)
+    run.workspace = worktree_dir
+    run._worktree_dir = worktree_dir
+
+    run.post_run(ExecutionResult(exit_code=0))
+
+    assert any(
+        call.args[0] == ["git", "push", "origin", "HEAD:refs/heads/master"]
+        and call.kwargs["cwd"] == worktree_dir
+        for call in mock_run.call_args_list
+    )
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_post_run_syncs_main_workspace_only_when_clean(mock_run, workspace, tmp_path):
+    """Test post_run fast-forwards the main workspace only if it is clean."""
+    worktree_dir = tmp_path / "monitoring-worktree"
+    worktree_dir.mkdir()
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+        if cmd == ["git", "rev-parse", "HEAD"] and cwd == worktree_dir:
+            return MagicMock(returncode=0, stdout="worktree-head\n", stderr="")
+        if cmd == ["git", "rev-parse", "origin/master"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout="worktree-head\n", stderr="")
+        if cmd == ["git", "status", "--short"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd == ["git", "fetch", "origin"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd == ["git", "merge", "--ff-only", "origin/master"] and cwd == workspace:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command: {cmd} (cwd={cwd})")
+
+    mock_run.side_effect = fake_run
+
+    run = ProjectMonitoringRun(workspace)
+    run.workspace = worktree_dir
+    run._worktree_dir = worktree_dir
+
+    run.post_run(ExecutionResult(exit_code=0))
+
+    assert any(
+        call.args[0] == ["git", "merge", "--ff-only", "origin/master"]
+        and call.kwargs["cwd"] == workspace
+        for call in mock_run.call_args_list
+    )
 
 
 @patch("gptme_runloops.project_monitoring.subprocess.run")
@@ -374,6 +481,9 @@ def test_execute_with_work(mock_execute, workspace):
     run = ProjectMonitoringRun(workspace)
     # Set cached work directly (simulates has_work() having been called)
     run._discovered_work = work_items
+    run._worktree_dir = workspace / "wt"
+    run._worktree_dir.mkdir()
+    run.workspace = run._worktree_dir
 
     prompt = run.generate_prompt()
     result = run.execute(prompt)
@@ -428,6 +538,9 @@ def test_execute_with_claude_code_backend(mock_execute, workspace):
             details="PR #123 updated",
         )
     ]
+    run._worktree_dir = workspace / "wt"
+    run._worktree_dir.mkdir()
+    run.workspace = run._worktree_dir
 
     prompt = run.generate_prompt()
     result = run.execute(prompt)
@@ -457,6 +570,9 @@ def test_execute_with_codex_backend(mock_execute, workspace):
             details="PR #123 updated",
         )
     ]
+    run._worktree_dir = workspace / "wt"
+    run._worktree_dir.mkdir()
+    run.workspace = run._worktree_dir
 
     prompt = run.generate_prompt()
     result = run.execute(prompt)
