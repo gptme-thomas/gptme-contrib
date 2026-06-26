@@ -552,6 +552,11 @@ def validate_task_file(file: Path, post: "fm.Post") -> List[str]:
         if priority not in ("high", "medium", "low", None):
             issues.append("Priority must be 'high', 'medium', or 'low'")
 
+    if "autonomy" in metadata:
+        autonomy = metadata["autonomy"]
+        if autonomy not in ("allowed", "interactive_only", None):
+            issues.append("Autonomy must be 'allowed' or 'interactive_only'")
+
     if "tags" in metadata and not isinstance(metadata["tags"], list):
         issues.append("Tags must be a list")
 
@@ -799,6 +804,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "name": task.name,
         "state": task.state,
         "priority": task.priority,
+        "autonomy": task.metadata.get("autonomy"),
         "created": task.created.isoformat() if task.created else None,
         "modified": task.modified.isoformat() if task.modified else None,
         "tags": task.tags,

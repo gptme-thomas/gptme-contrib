@@ -2302,6 +2302,7 @@ def ready(state, project, output_json, output_jsonl, use_cache):
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("State", style="blue")
     table.add_column("Priority", style="yellow")
+    table.add_column("Autonomy", style="blue")
     table.add_column("Task", style="white")
     table.add_column("Subtasks", style="magenta")
     table.add_column("Activity", style="green")  # New activity indicator
@@ -2319,6 +2320,15 @@ def ready(state, project, output_json, output_jsonl, use_cache):
             subtasks_str = f"{task.subtasks.completed}/{task.subtasks.total}"
         else:
             subtasks_str = "-"
+
+        # Autonomy: explicit task-level value, else the unset->interactive default.
+        autonomy_val = task.metadata.get("autonomy")
+        if autonomy_val == "allowed":
+            autonomy_str = "[green]allowed[/]"
+        elif autonomy_val == "interactive_only":
+            autonomy_str = "interactive"
+        else:
+            autonomy_str = "[dim]— (interactive)[/]"
 
         # Check for new activity on tracked URLs (Issue #241)
         activity_str = "-"
@@ -2338,6 +2348,7 @@ def ready(state, project, output_json, output_jsonl, use_cache):
             str(enum_id),
             state_emoji,
             priority_emoji or (task.priority or ""),
+            autonomy_str,
             task.name,
             subtasks_str,
             activity_str,
