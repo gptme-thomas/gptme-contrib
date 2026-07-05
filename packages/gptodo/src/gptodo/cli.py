@@ -109,6 +109,12 @@ from gptodo.subagent import (
     cleanup_sessions,
 )
 
+# States that count as "open, workable" for ready/next/compact views.
+# `todo` is deliberately included: it is the "ready to start, not yet begun"
+# state, but was missing from these filters until 2026-07-05 — `ready` (and
+# thus autonomous runners) silently never surfaced todo tasks.
+OPEN_WORK_STATES = ["backlog", "todo", "active"]
+
 # Import agent registry (Phase 1 of multi-agent coordination)
 from gptodo.agents import (
     list_agents,
@@ -465,7 +471,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
     # Filter tasks if active-only flag is set
     tasks = all_tasks
     if active_only:
-        tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+        tasks = [task for task in all_tasks if task.state in OPEN_WORK_STATES]
         if not tasks:
             if output_json:
                 print("No new or active tasks found", file=sys.stderr)
@@ -571,7 +577,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
                 if dep in all_tasks_dict:
                     dep_task = all_tasks_dict[dep]
                     # If dependency is in filtered list, show its ID
-                    if not active_only or dep_task.state in ["backlog", "active"]:
+                    if not active_only or dep_task.state in OPEN_WORK_STATES:
                         dep_ids.append(str(name_to_enum_id[dep]))
                     else:
                         # Show task name and state for filtered out dependencies
@@ -633,7 +639,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
                     if dep in all_tasks_dict:
                         dep_task = all_tasks_dict[dep]
                         # If dependency is in filtered list, show its ID
-                        if not active_only or dep_task.state in ["backlog", "active"]:
+                        if not active_only or dep_task.state in OPEN_WORK_STATES:
                             dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
                         else:
                             # Show task name and state for filtered out dependencies
@@ -1233,7 +1239,7 @@ def check_directory(
         )
 
     # Determine which states to show based on compact mode
-    states_to_show = ["backlog", "active"] if compact else config.states
+    states_to_show = OPEN_WORK_STATES if compact else config.states
 
     # Print active states in order
     for state in states_to_show:
@@ -2181,9 +2187,9 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "both"]),
+    type=click.Choice(["backlog", "todo", "active", "both"]),
     default="both",
-    help="Filter by task state (backlog, active, or both)",
+    help="Filter by task state (backlog, todo, active; 'both' = all open work states)",
 )
 @click.option(
     "--json",
@@ -2248,12 +2254,10 @@ def ready(state, project, output_json, output_jsonl, use_cache):
             console.print("[yellow]Warning: Cache empty. Run 'gptodo fetch' first.[/]")
 
     # Filter by state first
-    if state == "backlog":
-        filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
-    elif state == "active":
-        filtered_tasks = [task for task in all_tasks if task.state == "active"]
-    else:  # both
-        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+    if state in ("backlog", "todo", "active"):
+        filtered_tasks = [task for task in all_tasks if task.state == state]
+    else:  # both = all open work states
+        filtered_tasks = [task for task in all_tasks if task.state in OPEN_WORK_STATES]
 
     # Filter by project if specified
     if project:
@@ -2414,8 +2418,8 @@ def next_(project, output_json, use_cache):
         cache_path = get_cache_path(repo_root)
         issue_cache = load_cache(cache_path)
 
-    # Filter for new or active tasks
-    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+    # Filter for open work (backlog / todo / active) tasks
+    workable_tasks = [task for task in all_tasks if task.state in OPEN_WORK_STATES]
 
     # Filter by project if specified
     if project:
