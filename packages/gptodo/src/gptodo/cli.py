@@ -157,6 +157,10 @@ TASK_AUTONOMY_VALUES = [
     "allowed",
     "interactive_only",
 ]
+# States that represent workable (pick-up-able) tasks. `todo` means triaged
+# and ready to pick up, so it must be visible to ready/next/status views —
+# excluding it silently hides queued work from autonomous runners.
+WORKABLE_STATES = ["backlog", "todo", "active"]
 
 
 def _normalize_browse_state(filter_state: Optional[str]) -> Optional[str]:
@@ -465,7 +469,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
     # Filter tasks if active-only flag is set
     tasks = all_tasks
     if active_only:
-        tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+        tasks = [task for task in all_tasks if task.state in WORKABLE_STATES]
         if not tasks:
             if output_json:
                 print("No new or active tasks found", file=sys.stderr)
@@ -571,7 +575,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
                 if dep in all_tasks_dict:
                     dep_task = all_tasks_dict[dep]
                     # If dependency is in filtered list, show its ID
-                    if not active_only or dep_task.state in ["backlog", "active"]:
+                    if not active_only or dep_task.state in WORKABLE_STATES:
                         dep_ids.append(str(name_to_enum_id[dep]))
                     else:
                         # Show task name and state for filtered out dependencies
@@ -633,7 +637,7 @@ def list_(sort, active_only, context, project, output_json, output_jsonl):
                     if dep in all_tasks_dict:
                         dep_task = all_tasks_dict[dep]
                         # If dependency is in filtered list, show its ID
-                        if not active_only or dep_task.state in ["backlog", "active"]:
+                        if not active_only or dep_task.state in WORKABLE_STATES:
                             dep_strs.append(f"{dep} ({name_to_enum_id[dep]})")
                         else:
                             # Show task name and state for filtered out dependencies
@@ -1233,7 +1237,7 @@ def check_directory(
         )
 
     # Determine which states to show based on compact mode
-    states_to_show = ["backlog", "active"] if compact else config.states
+    states_to_show = WORKABLE_STATES if compact else config.states
 
     # Print active states in order
     for state in states_to_show:
@@ -2181,9 +2185,9 @@ def tags(state: Optional[str], show_tasks: bool, filter_tags: tuple[str, ...]):
 @cli.command("ready")
 @click.option(
     "--state",
-    type=click.Choice(["backlog", "active", "both"]),
-    default="both",
-    help="Filter by task state (backlog, active, or both)",
+    type=click.Choice(["backlog", "todo", "active", "all", "both"]),
+    default="all",
+    help="Filter by task state (default 'all' = backlog+todo+active; 'both' is a legacy alias)",
 )
 @click.option(
     "--json",
@@ -2248,12 +2252,10 @@ def ready(state, project, output_json, output_jsonl, use_cache):
             console.print("[yellow]Warning: Cache empty. Run 'gptodo fetch' first.[/]")
 
     # Filter by state first
-    if state == "backlog":
-        filtered_tasks = [task for task in all_tasks if task.state == "backlog"]
-    elif state == "active":
-        filtered_tasks = [task for task in all_tasks if task.state == "active"]
-    else:  # both
-        filtered_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+    if state in ("all", "both"):  # "both" is a legacy alias for "all"
+        filtered_tasks = [task for task in all_tasks if task.state in WORKABLE_STATES]
+    else:
+        filtered_tasks = [task for task in all_tasks if task.state == state]
 
     # Filter by project if specified
     if project:
@@ -2415,7 +2417,7 @@ def next_(project, output_json, use_cache):
         issue_cache = load_cache(cache_path)
 
     # Filter for new or active tasks
-    workable_tasks = [task for task in all_tasks if task.state in ["backlog", "active"]]
+    workable_tasks = [task for task in all_tasks if task.state in WORKABLE_STATES]
 
     # Filter by project if specified
     if project:
@@ -2940,7 +2942,7 @@ def sync(update, output_json, use_cache, light, full, changes_only):
             expected_state = "active"  # Reopened issue
 
         in_sync = (issue_state == "CLOSED" and task.state == "done") or (
-            issue_state == "OPEN" and task.state in ["backlog", "active", "waiting"]
+            issue_state == "OPEN" and task.state in ["backlog", "todo", "active", "waiting"]
         )
 
         # Check for new activity since waiting_since (Issue #241 feature)
