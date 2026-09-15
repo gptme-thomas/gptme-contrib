@@ -383,8 +383,20 @@ class ProjectMonitoringRun(BaseRunLoop):
                     is_new = True
 
                 if is_new:
+                    last_comment = self._get_last_comment(repo, pr_number)
+
+                    # Skip if the only new activity is our own comment (e.g. an
+                    # analysis comment posted by a previous monitoring session).
+                    # Otherwise every comment we post re-triggers a session.
+                    if self._is_self_comment_update(last_comment, updated_at):
+                        self.logger.info(
+                            f"PR {repo}#{pr_number} update is our own comment - skipping"
+                        )
+                        state_file.write_text(updated_at)
+                        continue
+
                     # Check if last comment is just mentioning someone else (e.g., "@greptileai review")
-                    if self._is_mention_of_someone_else(repo, pr_number):
+                    if self._is_mention_of_someone_else(repo, pr_number, last_comment):
                         # Update state file to avoid re-checking, but don't create work item
                         state_file.write_text(updated_at)
                         continue
@@ -539,21 +551,14 @@ class ProjectMonitoringRun(BaseRunLoop):
             self.logger.warning(f"Error checking last activity author: {e}")
             return False
 
-    def _is_mention_of_someone_else(self, repo: str, pr_number: int) -> bool:
-        """Check if the last comment is just mentioning someone else.
-
-        Filters out comments like "@greptileai review" or "review @coderabbitai"
-        that are invoking other bots/users, not requesting work from this agent.
-
-        Args:
-            repo: Repository name (owner/repo)
-            pr_number: PR number
+    def _get_last_comment(self, repo: str, pr_number: int) -> dict | None:
+        """Fetch the most recent issue comment on a PR.
 
         Returns:
-            True if last comment is a mention of someone other than self
+            Dict with ``author`` (login), ``createdAt`` and ``body``, or None if
+            the PR has no comments or the lookup failed.
         """
         try:
-            # Get last comment body
             result = subprocess.run(
                 [
                     "gh",
@@ -565,7 +570,8 @@ class ProjectMonitoringRun(BaseRunLoop):
                     "--json",
                     "comments",
                     "--jq",
-                    ".comments | sort_by(.createdAt) | last | .body",
+                    ".comments | sort_by(.createdAt) | last "
+                    "| {author: .author.login, createdAt: .createdAt, body: .body}",
                 ],
                 capture_output=True,
                 text=True,
@@ -573,9 +579,62 @@ class ProjectMonitoringRun(BaseRunLoop):
             )
 
             if result.returncode != 0 or not result.stdout.strip():
+                return None
+
+            comment = json.loads(result.stdout)
+            if not isinstance(comment, dict) or not comment.get("body"):
+                return None
+            return comment
+
+        except Exception as e:
+            self.logger.debug(
+                f"Error fetching last comment for {repo}#{pr_number}: {e}"
+            )
+            return None
+
+    def _is_self_comment_update(
+        self, last_comment: dict | None, updated_at: str
+    ) -> bool:
+        """Check if a PR update consists solely of a comment we posted ourselves.
+
+        GitHub bumps ``updatedAt`` to the comment's ``createdAt`` when a comment
+        is the latest event. If that comment is by ``self.author``, the "update"
+        is our own analysis comment and must not trigger another session. A
+        later push or third-party comment moves ``updatedAt`` past our comment's
+        timestamp, so those still get picked up.
+        """
+        if not self.author or not last_comment:
+            return False
+        if last_comment.get("author") != self.author:
+            return False
+        created_at = last_comment.get("createdAt") or ""
+        return bool(created_at) and created_at >= updated_at
+
+    def _is_mention_of_someone_else(
+        self, repo: str, pr_number: int, last_comment: dict | None = None
+    ) -> bool:
+        """Check if the last comment is just mentioning someone else.
+
+        Filters out comments like "@greptileai review" or "review @coderabbitai"
+        that are invoking other bots/users, not requesting work from this agent.
+
+        Args:
+            repo: Repository name (owner/repo)
+            pr_number: PR number
+            last_comment: Pre-fetched result of ``_get_last_comment`` (optional)
+
+        Returns:
+            True if last comment is a mention of someone other than self
+        """
+        try:
+            if last_comment is None:
+                last_comment = self._get_last_comment(repo, pr_number)
+            if not last_comment:
                 return False
 
-            body = result.stdout.strip()
+            body = str(last_comment.get("body", "")).strip()
+            if not body:
+                return False
 
             # Check if comment is short (likely just a bot invocation)
             # Long comments with mentions are probably real discussions

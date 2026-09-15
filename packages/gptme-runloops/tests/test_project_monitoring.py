@@ -579,3 +579,85 @@ def test_execute_with_codex_backend(mock_execute, workspace):
 
     assert result.exit_code == 0
     mock_execute.assert_called_once()
+
+
+def _pr_list_and_last_comment(pr_updated_at, comment_author, comment_created_at):
+    """Build a subprocess.run side effect: `gh pr list` -> one PR, `gh pr view` -> last comment."""
+    pr_data = json.dumps(
+        [
+            {
+                "number": 3,
+                "title": "feat: persist session",
+                "updatedAt": pr_updated_at,
+                "url": "https://github.com/gptme-thomas/moltis/pull/3",
+                "headRefName": "feat/persist",
+            }
+        ]
+    )
+    comment = json.dumps(
+        {
+            "author": comment_author,
+            "createdAt": comment_created_at,
+            "body": "## CI triage\n\nSix failures, three causes, no code defect.",
+        }
+    )
+
+    def side_effect(cmd, *args, **kwargs):
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return MagicMock(returncode=0, stdout=pr_data, stderr="")
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return MagicMock(returncode=0, stdout=comment, stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return side_effect
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_check_pr_updates_skips_own_comment(mock_run, workspace):
+    """An update whose only new event is our own comment must not create work."""
+    mock_run.side_effect = _pr_list_and_last_comment(
+        "2026-09-15T13:38:33Z", "gptme-thomas", "2026-09-15T13:38:33Z"
+    )
+
+    run = ProjectMonitoringRun(workspace, author="gptme-thomas")
+    assert run.check_pr_updates("gptme-thomas/moltis") == []
+
+    # State was advanced so the same timestamp is not re-evaluated next tick
+    state_file = (
+        workspace
+        / "logs"
+        / ".project-monitoring-state"
+        / "gptme-thomas-moltis-pr-3.state"
+    )
+    assert state_file.read_text().strip() == "2026-09-15T13:38:33Z"
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_check_pr_updates_push_after_own_comment_is_work(mock_run, workspace):
+    """A push after our comment moves updatedAt past it and must still be picked up."""
+    mock_run.side_effect = _pr_list_and_last_comment(
+        "2026-09-15T15:00:00Z", "gptme-thomas", "2026-09-15T13:38:33Z"
+    )
+
+    run = ProjectMonitoringRun(workspace, author="gptme-thomas")
+    work_items = run.check_pr_updates("gptme-thomas/moltis")
+    assert len(work_items) == 1
+    assert work_items[0].number == 3
+
+
+@patch("gptme_runloops.project_monitoring.subprocess.run")
+def test_check_pr_updates_other_author_comment_is_work(mock_run, workspace):
+    """A comment by someone else at updatedAt is real work."""
+    mock_run.side_effect = _pr_list_and_last_comment(
+        "2026-09-15T13:38:33Z", "michael", "2026-09-15T13:38:33Z"
+    )
+
+    run = ProjectMonitoringRun(workspace, author="gptme-thomas")
+    assert len(run.check_pr_updates("gptme-thomas/moltis")) == 1
+
+
+def test_is_self_comment_update_requires_author(workspace):
+    """Without a configured author nothing can be classified as self-authored."""
+    run = ProjectMonitoringRun(workspace, author="")
+    comment = {"author": "", "createdAt": "2026-09-15T13:38:33Z", "body": "x"}
+    assert run._is_self_comment_update(comment, "2026-09-15T13:38:33Z") is False
